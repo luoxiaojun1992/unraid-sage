@@ -26,12 +26,14 @@
 
 - 采集的状态数据格式化为 JSON，通过 OpenAI Chat Completions API 发送
 - API 格式兼容 Ollama、OpenRouter、Groq、vLLM 等
+- **AI Prompt 安全要求**: system prompt 中严格限制 AI 输出纯文本 JSON，**禁止输出任何 HTML 标签、Markdown 标记、JavaScript 代码**。所有文本字段（title/description/suggestion）必须为纯文本字符串
 - 要求 AI 返回结构化建议，含以下字段：
   - `severity`: `high` / `medium` / `low`
   - `category`: `performance` / `storage` / `security` / `other`
-  - `title`: 建议标题
-  - `description`: 问题描述
-  - `suggestion`: 具体优化建议
+  - `title`: 建议标题（纯文本，禁止 HTML/JS）
+  - `description`: 问题描述（纯文本，禁止 HTML/JS）
+  - `suggestion`: 具体优化建议（纯文本，禁止 HTML/JS）
+- **服务端二次防御**: `query-ai.sh` 在写入 JSON 前对 title/description/suggestion 做 `strip_tags()`（PHP）或 `sed 's/<[^>]*>//g'`（Shell）剥离残余 HTML 标签
 - `last-advice.json` 顶层字段包含 `collected_at`（采集时间戳）和 `advice_at`（AI 返回时间戳）
 - 历史缓存文件 `advice-YYYY-MM-DD-HHMM.json` 文件体内也包含时间戳字段，文件名仅作排序和辨识用
 
@@ -175,7 +177,10 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 - 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
 - 清理仅在添加新记录时触发，不产生额外独立写入周期
 - **原子写入**: `last-stats.json` 和 `last-advice.json`（运行时文件，供 WebGUI 实时读取）必须使用临时文件 + mv 的方式写入 — 先写 `.tmp` 后缀文件，完成后 `mv` 覆盖目标文件，确保 WebGUI PHP 不会读到半截写的中间状态
-- **AI 建议防 XSS**: AI 返回的建议内容（`title`、`description`、`suggestion` 字段）不可信任，可能包含 HTML/脚本。写入 JSON 文件时 PHP 做 `htmlspecialchars()` 转义；前端 JS 用 `textContent`（而非 `innerHTML`）渲染
+- **AI 建议防 XSS**（三道防线）:
+  1. **AI Prompt 层**: system prompt 明确禁止输出 HTML/JS，规定纯文本返回
+  2. **服务端剥离层**: `query-ai.sh` 写入 JSON 前用 `sed 's/<[^>]*>//g'` 剥离所有 HTML 标签；PHP 输出时再做 `htmlspecialchars()` 双保险
+  3. **前端渲染层**: JS 用 `textContent`（而非 `innerHTML`）渲染建议内容
 - **配置文件同样原子写入**: `ai-advisor.cfg` 也使用 `.tmp + mv` 模式写入，避免 PHP 写入中断导致 `parse_ini_file()` 解析失败
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/tmp/ai-advisor/`、`/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
@@ -286,13 +291,14 @@ unraid-sage/
 - **锁文件**: 所有获取锁的操作必须做 PID 存活检测（`kill -0 $pid` 或检查 `/proc/$pid/`），禁止仅因文件存在就阻塞
 - **进程命名**: 所有 daemon 相关的进程名必须包含 `ai-sage` 前缀，通过 `exec -a ai-sage-xxx` 实现
 - **超时保护**: 所有可能长时间执行的命令必须使用 `timeout N` 包起来，collect-stats 30s、query-ai 120s、清理 10s
+- **HTML 剥离**: `query-ai.sh` 处理 AI 返回的文本字段时，必须用 `sed 's/<[^>]*>//g'` 剥离所有 HTML 标签，之后再写入 JSON
 - **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
 
 ### 5.2 PHP (.page)
 
 - **风格**: 遵循 Unraid WebGUI 的 PHP + HTML 混合风格
 - **无外部 PHP 框架**: 只用 Unraid 内置的 PHP 函数
-- **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出。AI 建议内容（`title`/`description`/`suggestion`）同样视为不可信输入，写入 JSON 和 HTML 输出时均需转义
+- **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出。AI 建议内容视为不可信输入：PHP 输出前做 `strip_tags()` + `htmlspecialchars()` 双重处理
 - **配置读取**: 通过 `parse_ini_file()` 读取 `.cfg` 文件
 - **配置写入**: 先写 `.tmp` 再 `mv` 覆盖原文件，与 Shell 端原子写规则一致
 - **表单处理**: 提交后 `exec()` 调用固定路径的 update-config.sh 脚本，不拼接用户输入
@@ -323,7 +329,8 @@ unraid-sage/
 | `test_query_ai.sh` | query-ai.sh 输出合法 JSON | `jq . /tmp/ai-advisor/last-advice.json` |
 | 同测试 | 建议包含 severity/category/title/description/suggestion | 逐个字段验证 |
 | 同测试 | severity 值域正确 | `jq '.[].severity'` 验证 in (high,medium,low) |
-| `test_xss_prevention.sh` | AI 建议中的 HTML 标签被正确转义 | 注入 `<script>alert(1)</script>`，验证输出为 `&lt;script&gt;` |
+| `test_xss_prevention.sh` | AI 建议中的 HTML 标签被正确剥离 | 注入 `<script>alert(1)</script>`，验证输出为空文本 |
+| 同测试 | 正常文本中的 `<` 和 `>` 被正确保留 | 验证 `5 < 10` 不被误删 |
 | 同测试 | PHP `htmlspecialchars()` 双编码测试 | 验证 `&` 不被二次转义 |
 | `test_desensitization.sh` | 发送给 AI 的 JSON 不含容器名称 | `jq '..|.name? // empty'` 应只有镜像名 |
 | 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
@@ -384,7 +391,8 @@ unraid-sage/
 - [ ] 每次 cron 触发后，`/tmp/ai-advisor/last-stats.json` 正确更新
 - [ ] `last-stats.json` 包含 CPU/内存/磁盘/阵列/Docker/网络/系统 全部指标
 - [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议，含 `collected_at` 和 `advice_at` 时间戳
-- [ ] AI 建议中的 `title`/`description`/`suggestion` 经过 HTML 转义，不会因 AI 返回内容触发 XSS
+- [ ] AI 建议中的 `title`/`description`/`suggestion` 经过 HTML 标签剥离 + 转义，不会因 AI 返回内容触发 XSS
+- [ ] AI Prompt 中明确要求纯文本 JSON 输出、禁止 HTML/JS
 - [ ] 前端渲染 AI 建议时使用 `textContent`，不使用 `innerHTML`
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
