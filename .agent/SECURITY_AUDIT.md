@@ -14,100 +14,92 @@
 | P1 | 敏感数据泄露或权限提升风险 | 4 |
 | P2 | 防御性编码缺失，可被利用但攻击面有限 | 5 |
 
+## 处理决策汇总
+
+| 编号 | 等级 | 决策 | 说明 |
+|------|------|------|------|
+| P0-1 | 误报 → P2 | 修正 | `exec()` 路径固定，不拼接用户输入；但参数仍应 escapeshellarg，标记为 P2 |
+| P0-2 | 设计需求 | 维持 | SSRF 是功能需求（用户必须能配置任意 endpoint）；Unraid WebGUI 本身仅 admin 可访问，风险已受控 |
+| P0-3 | 暂不处理 | 闭环 | cron daemon 和手动清除的用户 UID 可能不一致，无法保证 root 独占 `/tmp`；环境本身是单用户 NAS 场景 |
+| P1-1 | 不修复 | 闭环 | 无好的方案，接受为已知风险 |
+| P1-2 | 需修复 | 修正 | 发送给 AI 的数据必须做最小化处理：剔除 IP 地址、敏感路径等 |
+| P1-3 | 需修复 | 修正 | 配置文件必须使用原子写入（.tmp + mv） |
+| P1-4 | 需修复 | 修正 | 卸载时清理 `/tmp/ai-advisor/` |
+| P2-1~5 | 部分需修 | 修正 | P2-4(kill 信号) 应修复；其余后续迭代 |
+
 ---
 
 ## P0 — 必须修复
 
 ### P0-1: PHP exec() 存在命令注入风险
+**状态**: 🔄 修正为 P2
 
 **位置**: §5.2 "表单处理: 提交后 `exec()` 调用后台脚本更新配置"
-**危害**: API Endpoint URL、Cron 表达式、Model 名称等用户输入直接拼接到 shell 命令中。攻击者可通过精心构造的输入执行任意命令。
-**攻击面**: 网络 → WebGUI 设置页 → root 权限命令执行
+**背景澄清**:
+- `exec()` 的脚本路径是固定的 `/usr/local/emhttp/plugins/ai-advisor/scripts/update-config.sh`，不由用户输入决定
+- 脚本参数从配置文件读取，而非命令行参数
+- 原始评估假设了「用户输入直接拼接到命令中」，在 Unraid 标准 PHP 模式中不成立
+**残留风险**: 写入配置文件的值如果在 Shell 脚本中被未经转义地 eval/exec，仍可能构成风险
+**缓解**: `update-config.sh` 内部对读取的配置值做合法性校验
 
-**修复建议**:
-1. `exec()` 的所有参数必须经过 `escapeshellarg()` 转义
-2. 不要将用户输入直接拼接到命令字符串中，改用环境变量传递：
-   ```php
-   // ❌ 危险
-   exec("/usr/local/emhttp/plugins/ai-advisor/scripts/update-config.sh " . $_POST['api_endpoint']);
-
-   // ✅ 安全
-   putenv("SAGE_API_ENDPOINT=" . escapeshellarg($_POST['api_endpoint']));
-   exec("/usr/local/emhttp/plugins/ai-advisor/scripts/update-config.sh");
-   ```
-3. 配置写入由 Shell 脚本从环境变量读取，脚本内部也做参数校验
-
-### P0-2: API Endpoint 无 SSRF 防护
+### P0-2: API Endpoint 无 URL 校验
+**状态**: ✅ 设计需求，维持
 
 **位置**: §1.5 用户可配置 API Endpoint URL
-**危害**: 用户可以配置任意 URL，包括 `http://127.0.0.1:9200`（Elasticsearch）、`http://127.0.0.1:8080`（内部服务）等内网地址。恶意插件或脚本可通过修改配置实现 SSRF。
-
-**修复建议**:
-1. 在 PHP 设置页和后端脚本中校验 URL schema 只允许 `http://` 和 `https://`
-2. 禁止指向私有 IP 段（`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`）
-3. 在 `query-ai.sh` 中用 curl `--resolve` 或显式 IP 检查做二次防御
-4. 添加可选的"允许内联 endpoint"开关，默认关闭
+**说明**:
+- 支持任意 endpoint 是功能需求（用户必须能连本地 Ollama `http://localhost:11434` 或任意远程 API）
+- Unraid WebGUI 仅 admin 可访问，所有能操作设置页的人已经有 root 权限
+- 不作为漏洞闭环
+**防守建议**（可选实现）:
+- 在设置页做 URL schema 校验（只允许 http/https）
+- 添加"允许访问私有地址"开关（默认开启，兼容本地部署场景）
 
 ### P0-3: /tmp/ai-advisor/ 目录权限过松
+**状态**: 🔒 暂不处理
 
 **位置**: §3.4 §2 架构图
-**危害**: `/tmp/ai-advisor/` 创建在全局可读的 tmpfs 上。`daemon.lock` 可被任意本地用户篡改（写入恶意 PID 诱导 clear-lock.sh 误杀进程），`last-stats.json` 泄露系统敏感信息（IP、目录结构、Docker 配置）。
-
-**修复建议**:
-1. daemon 启动时显式创建目录并设置权限：
-   ```bash
-   mkdir -p /tmp/ai-advisor
-   chmod 700 /tmp/ai-advisor  # 仅 owner 可读写执行
-   ```
-2. 关键文件进一步限制权限：
-   ```bash
-   umask 077  # 在写入 daemon.lock 和 last-*.json 前设置
-   ```
-3. 如果 plugin 始终以 root 运行：`chown root:root /tmp/ai-advisor && chmod 700 /tmp/ai-advisor`
+**说明**:
+- cron daemon 和手动清除锁的用户 UID 可能不一致，无法保证 root 独占 `/tmp/ai-advisor/`
+- 单用户 NAS 场景下攻击面有限
+- 待多用户场景需求明确后再评估
 
 ---
 
 ## P1 — 建议修复
 
 ### P1-1: API Key 明文存储
+**状态**: 🔒 接受风险
 
 **位置**: §3.3 "API Key 明文存储到 /boot/config/plugins/ai-advisor/ai-advisor.cfg"
-**风险**: Unraid 的 `/boot/config/plugins/` 下所有插件配置文件都是明文。任何能 SSH 登录的人、或受害插件（被攻陷的其他插件）都能读取 API Key。
-
-**缓解建议**:
-1. 至少限制配置文件权限 `chmod 600 ai-advisor.cfg`
-2. 提供选项让用户使用环境变量注入 Key（通过 Unraid 的 Docker 风格的变量机制），而非写入文件
-3. 在 WebGUI 显示 Key 时默认 masked（`********`），仅通过单独的"显示"按钮操作
-4. 文档注明这是 Unraid 生态的通用问题，建议用户使用本地 Ollama 以完全避免 Key 泄露
+**说明**:
+- Unraid 插件生态的通用问题，无好的解决方案
+- 推荐用户使用本地 Ollama 以完全避免 Key 泄露
+- 文档明确告知此风险
 
 ### P1-2: 远程 API 发送的数据包含敏感信息
+**状态**: 🔧 需修复 — 见 §1.2 数据最小化规则
 
 **位置**: §1.1 采集的系统状态
-**风险**: 系统状态包含 IP 地址（`ip -j addr`）、目录挂载路径、Docker 容器名/镜像名。如果用户配置的是远程 AI API（如 OpenRouter、vLLM 公有实例），这些数据会离开内网。
-
-**缓解建议**:
-1. 在设置页添加"发送前审查"预览面板，展示即将发送的 JSON 数据
-2. 添加可配置的数据脱敏开关，默认模糊化 IP 地址（`192.168.x.x` → `192.168.*.*`）
-3. 在文档/WebGUI 中明确提示远程 API 的数据隐私风险
-4. 推荐使用本地 Ollama 作为首选方案
+**修复要求**:
+- 发送给 AI 的数据**必须**做最小化处理，剔除以下敏感信息：
+  - IP 地址（仅保留接口名称和 MTU）
+  - 完整挂载路径（仅保留挂载点名称和总量/使用量）
+  - Docker 环境变量和端口映射
+  - 用户名、主机名、域名
+- 在设置页添加"发送前审查"预览面板
+- 推荐使用本地 Ollama 作为首选方案
 
 ### P1-3: 配置文件非原子写入
+**状态**: 🔧 需修复 — 见 §3.3 和 §5.2
 
-**位置**: §5.2 "表单处理: 提交后 `exec()` 调用后台脚本更新配置"
-**风险**: PHP 写入 `ai-advisor.cfg` 时如果进程被中断（OOM、掉电），配置文件可能处于半写状态，`parse_ini_file()` 解析失败导致整个插件异常。
-
-**缓解建议**:
-1. 对 `ai-advisor.cfg` 同样使用原子写入模式：先写 `.tmp` 再 `mv`
-2. `update-config.sh` 脚本也应用此规则
+**位置**: §5.2
+**修复要求**: `ai-advisor.cfg` 必须使用 `.tmp + mv` 原子写入，与运行时 JSON 文件一致
 
 ### P1-4: 插件卸载未彻底清理 /tmp 残留
+**状态**: 🔧 需修复 — 见 §3.3
 
-**位置**: §3.3 "插件卸载时清理 /boot/config/plugins/ai-advisor/ 和 /usr/local/emhttp/plugins/ai-advisor/"
-**风险**: `/tmp/ai-advisor/` 在 RAM 中，重启会自动清理。但如果用户在关机前卸载插件再重装，`/tmp/ai-advisor/` 中的敏感数据仍可被新实例或其他进程读取。
-
-**缓解建议**:
-1. 卸载脚本中补充 `rm -rf /tmp/ai-advisor/`
-2. 卸载脚本也应记录日志
+**位置**: §3.3
+**修复要求**: 卸载脚本中补充 `rm -rf /tmp/ai-advisor/`
 
 ---
 
@@ -128,10 +120,10 @@
 **位置**: §1.5 用户可配置 Cron 表达式
 **建议**: Shell 脚本在设置 cron 前校验表达式格式（至少有 5 个字段、字段值域合法），拒绝非法表达式而不只是"使用默认值"。
 
-### P2-4: kill 信号可配置
+### P2-4: kill 信号类型
+**状态**: 🔧 需修复 — 见 §3.4
 
-**位置**: §3.4 clear-lock.sh 使用 `kill $PID`
-**建议**: 优先使用 `kill -TERM $PID`（显式指定 SIGTERM），给进程优雅退出的机会。只有 SIGTERM 无效时才考虑 SIGKILL。当前文档只写了 `kill`，行为依赖系统默认信号。
+**建议**: `clear-lock.sh` 中使用 `kill -TERM $PID` 替代裸 `kill`（裸 kill 在某些 shell 中可能映射为 SIGKILL）
 
 ### P2-5: 日志中不应包含 shell 命令输出
 
@@ -140,15 +132,11 @@
 
 ---
 
-## 修复优先级建议
+## 最终修复清单
 
-| 优先级 | 编号 | 内容 | 影响面 |
-|--------|------|------|--------|
-| 紧急 | P0-1 | PHP exec() 命令注入 | 远程代码执行 |
-| 紧急 | P0-2 | API Endpoint SSRF | 内网横向移动 |
-| 紧急 | P0-3 | /tmp 目录权限过松 | 本地提权/信息泄露 |
-| 高 | P1-1 | API Key 明文 | 凭据泄露 |
-| 高 | P1-2 | 系统数据外发 | 隐私泄露 |
-| 中 | P1-3 | 配置非原子写入 | 插件异常 |
-| 中 | P1-4 | 卸载残留 | 信息泄露 |
-| 低 | P2-1~5 | 防守性编码 | 纵深防御 |
+| 优先级 | 编号 | 内容 | 状态 |
+|--------|------|------|------|
+| 立即 | P1-2 | 发送给 AI 的数据最小化 | 需改 AGENT_INSTRUCTION §1.2 |
+| 立即 | P1-3 | 配置文件原子写入 | 需改 AGENT_INSTRUCTION §3.3/§5.2 |
+| 立即 | P1-4 | 卸载清理 /tmp | 需改 AGENT_INSTRUCTION §3.3 |
+| 顺便 | P2-4 | kill → kill -TERM | 需改 AGENT_INSTRUCTION §3.4 |

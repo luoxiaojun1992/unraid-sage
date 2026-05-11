@@ -10,15 +10,17 @@
 
 ### 1.1 系统状态采集
 
-| 类别 | 具体采集项 | 采集命令 |
-|------|-----------|---------|
-| CPU | load average (1/5/15m)、核心数、温度 | `/proc/loadavg`, `/sys/class/thermal/*/temp`, `nproc` |
-| 内存 | total / used / available / swap | `free -b` 或 `/proc/meminfo` |
-| 磁盘 | 每块盘使用率、文件系统、挂载点、SMART 状态 | `df -B1`, `smartctl`（如可用） |
-| 阵列 | 总容量 / 已用 / 可用、校验盘、缓存池 | `/var/local/emhttp/var.ini` |
-| Docker | 容器总数、运行/停止数、各容器状态 | `docker ps -a --format json`, `docker stats --no-stream` |
-| 网络 | 接口列表、IP、MTU、流量 | `ip -j addr`, `/proc/net/dev` |
-| 系统 | 运行时间、Unraid 版本、内核版本 | `uptime`, `/etc/unraid-version`, `uname -r` |
+| 类别 | 具体采集项 | 采集命令 | 脱敏处理 |
+|------|-----------|---------|---------|
+| CPU | load average (1/5/15m)、核心数、温度 | `/proc/loadavg`, `/sys/class/thermal/*/temp`, `nproc` | 无敏感信息 |
+| 内存 | total / used / available / swap | `free -b` 或 `/proc/meminfo` | 无敏感信息 |
+| 磁盘 | 每块盘使用率、文件系统、挂载点、总容量 | `df -B1` | 挂载路径仅保留 `/mnt/user/sharename` 级别的名称，不包含 UUID 或序列号；跳过 SMART 原始值 |
+| 阵列 | 总容量 / 已用 / 可用、校验盘类型、缓存池配置 | `/var/local/emhttp/var.ini` | 不包含磁盘序列号 |
+| Docker | 容器总数、运行/停止数、各容器名称/状态 | `docker ps -a --format json` | **不发送**端口映射、环境变量、挂载卷路径 |
+| 网络 | 接口名称、MTU、是否 UP | `ip -j addr` | **不发送** IP 地址和 MAC 地址，仅接口名和状态 |
+| 系统 | 运行时间、Unraid 版本、内核版本 | `uptime`, `/etc/unraid-version`, `uname -r` | 无敏感信息 |
+
+> ⚠️ **隐私说明**: 采集的数据发送到远程 AI API 时会离开内网。所有 IP 地址、磁盘序列号、Docker 端口映射和环境变量已在采集层剔除。推荐优先使用本地 Ollama 以避免数据外发。
 
 ### 1.2 AI 分析
 
@@ -170,8 +172,9 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 - 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
 - 清理仅在添加新记录时触发，不产生额外独立写入周期
 - **原子写入**: `last-stats.json` 和 `last-advice.json`（运行时文件，供 WebGUI 实时读取）必须使用临时文件 + mv 的方式写入 — 先写 `.tmp` 后缀文件，完成后 `mv` 覆盖目标文件，确保 WebGUI PHP 不会读到半截写的中间状态
+- **配置文件同样原子写入**: `ai-advisor.cfg` 也使用 `.tmp + mv` 模式写入，避免 PHP 写入中断导致 `parse_ini_file()` 解析失败
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
-- 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
+- 插件卸载时清理 `/tmp/ai-advisor/`、`/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
 ### 3.4 文件锁机制（防重复执行）
 
@@ -203,7 +206,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 1. 读取 `daemon.lock` 中的 PID
 2. 锁文件不存在 → `logger -t ai-advisor "clear-lock: no lock file"` → 退出
 3. 锁存在 → 执行 `ps -p $PID -o comm=` 获取进程名
-4. **PID 存活 + 进程名包含 ai-sage** → `kill $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
+4. **PID 存活 + 进程名包含 ai-sage** → `kill -TERM $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
 5. **PID 存活但进程名不含 ai-sage** → 只删除 `daemon.lock`，不 kill → `logger -t ai-advisor "clear-lock: removed stale lock, pid $PID belongs to $actual_name, not killed"`
 6. **PID 已死** → 直接删除 `daemon.lock` → 记日志
 
@@ -285,7 +288,8 @@ unraid-sage/
 - **无外部 PHP 框架**: 只用 Unraid 内置的 PHP 函数
 - **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出
 - **配置读取**: 通过 `parse_ini_file()` 读取 `.cfg` 文件
-- **表单处理**: 提交后 `exec()` 调用后台脚本更新配置
+- **配置写入**: 先写 `.tmp` 再 `mv` 覆盖原文件，与 Shell 端原子写规则一致
+- **表单处理**: 提交后 `exec()` 调用固定路径的 update-config.sh 脚本，不拼接用户输入
 
 ### 5.3 JavaScript
 
