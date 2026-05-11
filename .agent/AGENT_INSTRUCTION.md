@@ -40,7 +40,8 @@
 ### 1.3 WebGUI 展示
 
 - **主页面** (`ai-advisor.page`):
-  - **默认文件模式**: AI 建议以可下载的 JSON 文件形式提供，用户下载后用本地查看器打开（零渲染风险）
+  - **默认文件模式**: AI 建议以可下载的 JSON 文件形式提供，用户下载后用本地查看器打开（零渲染风险）。下载通过专用端点 `download-advice.php` 实现，后端构造 JSON 响应，通过 `Content-Disposition` header 指定文件名（如 `ai-sage-advice-2026-05-11-1748.json`），**不提供通用文件下载接口**
+  - **可选 HTML 模式**: 用户可在设置页开启此模式，AI 建议渲染为 HTML 卡片列表（按严重程度排序），每条卡片显示：
   - **可选 HTML 模式**: 用户可在设置页开启此模式，AI 建议渲染为 HTML 卡片列表（按严重程度排序），每条卡片显示：
     - 标题、描述、建议内容
     - 生成时间戳（`advice_at`）
@@ -83,6 +84,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 ┌──────────────────────────────────────────────────────────┐
 │  WebGUI (PHP .page)                                       │
 │  ├─ 主页面: 展示上次采集时间 + AI 建议列表（含时间戳）    │
+│  ├─ download-advice.php (专用下载端点, 固定 filename header)│
 │  └─ 设置页: API/key/model/cron/保留条数/输出模式        │
 │       ├─ 输出模式: file(默认下载) / html(可选渲染)      │
 │       ├─ 锁状态指示: 锁定中(PID) / 空闲                  │
@@ -189,6 +191,20 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/tmp/ai-advisor/`、`/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
+### 3.4 下载接口安全设计
+
+**专用端点** `download-advice.php`:
+- 仅读取 `last-advice.json`，构造 JSON 响应
+- 设置 `Content-Type: application/json` 和 `Content-Disposition: attachment; filename="ai-sage-advice-{timestamp}.json"`
+- 文件名中的时间戳从 `last-advice.json` 的 `collected_at` 字段提取，不依赖用户输入
+- 输出 JSON 内容后 `exit`，不执行任何额外操作
+
+**安全约束**（不提供通用下载接口）:
+- 禁止 `download.php?file=xxx` 或 `download.php?path=xxx` 模式
+- 禁止读取 `last-advice.json` 之外的任何文件
+- 禁止接受用户传入的文件路径或名称参数
+- PHP 层面的过滤：即使收到 `file` 或 `path` 参数也忽略
+
 ### 3.4 文件锁机制（防重复执行）
 
 **目的**: 避免 cron 周期短于 AI API 响应时间时，前后两次执行重叠。
@@ -246,8 +262,9 @@ unraid-sage/
 │   ├── event/
 │   │   └── started              #   阵列启动钩子
 │   ├── pages/
-│   │   ├── ai-advisor.page      #   WebGUI 主页面
-│   │   └── ai-advisor.settings.page  # 设置页面
+│   │   ├── ai-advisor.page          #   WebGUI 主页面
+│   │   ├── download-advice.php      #   专用下载端点（无通用下载接口）
+│   │   └── ai-advisor.settings.page #   设置页面
 │   ├── javascript/
 │   │   └── advisor.js           #   WebGUI JS
 │   └── styles/
@@ -342,6 +359,10 @@ unraid-sage/
 | 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
 | `test_config_validation.sh` | OUTPUT_MODE 设为非法值（如 `xxx`）自动回退 `file` | 验证配置写入后读取仍为 `file` |
 | 同测试 | OUTPUT_MODE 设为合法值 `html` 正常写入 | 验证配置读取为 `html` |
+| `test_download.sh` | download-advice.php 返回合法 JSON | 验证 HTTP 200 + Content-Type application/json |
+| 同测试 | 响应头含 Content-Disposition attachment | 验证 `grep -i attachment` |
+| 同测试 | 文件名包含时间戳而非固定值 | 验证 filename 匹配 `ai-sage-advice-` 前缀 |
+| 同测试 | 传入 file=xxx 参数时被忽略 | 验证仍返回 last-advice.json |
 | `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
 | 同测试 | 写入完成后 .tmp 后缀文件已清除 | `ls /tmp/ai-advisor/*.tmp` 应为空 |
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
@@ -404,6 +425,8 @@ unraid-sage/
 - [ ] 默认输出模式为 `file`（下载 JSON），切换到 `html` 后 WebGUI 渲染卡片
 - [ ] HTML 模式下 XSS 防线与 file 模式一致，不因模式切换退化
 - [ ] OUTPUT_MODE 后端校验枚举值，非法值自动回退 `file`
+- [ ] 下载接口为专用端点 `download-advice.php`，无通用文件下载接口
+- [ ] 下载时 Content-Disposition 指定文件名，不可通过参数篡改路径
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
