@@ -69,10 +69,10 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 
 - API Endpoint URL（默认 `http://localhost:11434/v1/chat/completions`）
 - API Key（可选，非本地 API 需要）
-- Model 名称（本地 Ollama 默认 `qwen2.5:7b`）
+- Model 名称（本地 Ollama 默认 `qwen2.5:7b`）— ⚠️ 建议使用可信任的主流模型（Ollama 官方模型、OpenAI、Claude 等），避免使用来源不明的第三方模型，后者可能返回恶意构造的建议内容
 - Cron 定时表达式（默认 `0 */6 * * *` 每 6 小时）
 - 历史建议保留条数（默认 `30`，设 `0` 表示不保留历史）
-- 输出模式: `file`（默认，下载 JSON 文件）/ `html`（在 WebGUI 中渲染卡片。开启时 XSS 防护仍然有效，但用户需知悉网页渲染的残余风险）
+- 输出模式: `file`（默认，下载 JSON 文件）/ `html`（在 WebGUI 中渲染卡片。开启时 XSS 防护仍然有效，但用户需知悉网页渲染的残余风险）。后端校验枚举值，仅接受 `file` 或 `html`，非法值回退到 `file`
 - 启用/禁用
 
 ---
@@ -305,6 +305,7 @@ unraid-sage/
 - **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出。AI 建议内容视为不可信输入：PHP 输出前做 `strip_tags()` + `htmlspecialchars()` 双重处理
 - **配置读取**: 通过 `parse_ini_file()` 读取 `.cfg` 文件
 - **配置写入**: 先写 `.tmp` 再 `mv` 覆盖原文件，与 Shell 端原子写规则一致
+- **配置校验**: 所有枚举值配置（如 OUTPUT_MODE）在写入前做严格校验，仅接受白名单内的值，非法值回退到安全默认值
 - **表单处理**: 提交后 `exec()` 调用固定路径的 update-config.sh 脚本，不拼接用户输入
 
 ### 5.3 JavaScript
@@ -339,6 +340,8 @@ unraid-sage/
 | 同测试 | HTML 模式下 XSS 防线不退化 | file/html 模式切换后测试同上 |
 | `test_desensitization.sh` | 发送给 AI 的 JSON 不含容器名称 | `jq '..|.name? // empty'` 应只有镜像名 |
 | 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
+| `test_config_validation.sh` | OUTPUT_MODE 设为非法值（如 `xxx`）自动回退 `file` | 验证配置写入后读取仍为 `file` |
+| 同测试 | OUTPUT_MODE 设为合法值 `html` 正常写入 | 验证配置读取为 `html` |
 | `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
 | 同测试 | 写入完成后 .tmp 后缀文件已清除 | `ls /tmp/ai-advisor/*.tmp` 应为空 |
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
@@ -400,6 +403,7 @@ unraid-sage/
 - [ ] AI Prompt 中明确要求纯文本 JSON 输出、禁止 HTML/JS
 - [ ] 默认输出模式为 `file`（下载 JSON），切换到 `html` 后 WebGUI 渲染卡片
 - [ ] HTML 模式下 XSS 防线与 file 模式一致，不因模式切换退化
+- [ ] OUTPUT_MODE 后端校验枚举值，非法值自动回退 `file`
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
