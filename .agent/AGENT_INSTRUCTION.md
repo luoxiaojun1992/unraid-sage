@@ -169,6 +169,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 
 ### 3.3 安全与持久化设计
 
+- **认证边界**: Unraid WebGUI 本身已有登录认证。所有 `.page` 文件运行在已认证的 HTTP 上下文中，未登录用户无法访问任何插件页面。Unraid 没有内置的 `is_admin()` 函数——WebGUI 的登录即等价于 admin 权限。表单提交（`exec()` 调用后台脚本）继承了同一个认证上下文。
 - API Key 明文存储到 `/boot/config/plugins/ai-advisor/ai-advisor.cfg`（Unraid 插件标准做法）
 - 采集脚本不写入源文件系统，只输出到 `/tmp/`（RAM）
 - 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
