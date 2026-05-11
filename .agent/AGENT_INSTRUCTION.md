@@ -55,6 +55,7 @@
   - **手动清除锁**按钮 + 当前锁状态指示（锁定中的 PID、进程名、进程是否存活）
   - 清除逻辑：读取锁中 PID → `ps -p $PID -o comm=` 确认进程名含 `ai-sage` → 只有 PID **和** 进程名都匹配时才 `kill` + 删除锁文件 → 否则只写 warning 日志不执行清除
   - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared: killed pid $PID (ai-sage)"`
+  - **[立即运行] 按钮**: 调用 `advisor-daemon.sh run-once` 模拟一次 cron 触发。执行前检查 daemon.lock（与 cron 锁策略完全一致）：锁存在 + PID 存活 + 进程名含 ai-sage → 跳过并提示"已有一个任务在运行"；否则正常执行一轮采集和分析
 
 ### 1.4 历史建议缓存与清理
 
@@ -89,9 +90,10 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 │       ├─ 输出模式: file(默认下载) / html(可选渲染)      │
 │       ├─ 锁状态指示: 锁定中(PID) / 空闲                  │
 │       └─ [清除锁] 按钮 → exec(clear-lock.sh)             │
+│       └─ [立即运行] 按钮 → exec advisor-daemon.sh run-once│
 ├──────────────────────────────────────────────────────────┤
 │  后端脚本 (Shell + jq)                                    │
-│  ├─ advisor-daemon.sh (锁管理: 获取/释放/检测)            │
+│  ├─ advisor-daemon.sh (锁管理: 获取/释放/检测, run-once 模式)│
 │  ├─ collect-stats.sh → JSON (CPU/内存/磁盘/Docker)       │
 │  ├─ query-ai.sh → POST AI API → 含时间戳的建议           │
 │  └─ clear-lock.sh (设置页调用, 匹配才 kill, 不匹配也删锁)│
@@ -222,6 +224,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
   4. PID 存活 + 名匹配 → 跳过本轮，写 warning 日志
   5. PID 已死或名不匹配 → 覆盖写入当前 PID → 获得锁（自愈）
 - 释放锁: 本轮执行完成后删除 `daemon.lock`
+- **手动触发** (`advisor-daemon.sh run-once`): 支持 `run-once` 参数，执行与 cron 相同的锁检查逻辑，获取锁后运行一轮完整的采集→AI→保存流程，流程结束后释放锁。用于设置页"立即运行"按钮
 
 **执行超时保护**（防止命令阻塞整个循环）:
 - 每个子步骤必须设置超时，使用 `timeout` 命令
@@ -368,6 +371,8 @@ unraid-sage/
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
 | `test_daemon.sh` | daemon start/stop/status 正常 | 验证 PID 文件 |
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
+| 同测试 | daemon run-once 执行完整一轮 | 验证 last-stats.json 和 last-advice.json 更新 |
+| 同测试 | run-once 被锁拦截 | 伪造锁 + 存活 PID，验证 run-once 跳过 |
 | `test_lock.sh` | 锁文件存在且 PID 存活时跳过执行 | 伪造锁文件 + 存活的 PID(cron)，验证跳过 |
 | 同测试 | 锁文件存在但 PID 已死时自动覆盖 | 伪造锁文件 + 已死的 PID，验证重新执行 |
 | 同测试 | PID 存活但进程名不含 ai-sage 时自动覆盖 | 伪造锁文件 + 非 ai-sage 进程，验证重新执行 |
@@ -390,6 +395,7 @@ unraid-sage/
 | 插件安装 | `.plg` 安装成功，文件部署到正确位置 |
 | 阵列启动 | daemon 自动启动，PID 文件存在 |
 | 定时采集 | 到 cron 时间点，`last-stats.json` 更新 |
+| 手动触发 | 点击"立即运行"，锁空闲时正常运行并被锁拦截时提示 |
 | AI 分析 | 有建议输出，WebGUI 正常展示 |
 | 配置修改 | 修改 API endpoint，下次采集生效 |
 | 插件卸载 | 所有文件清理干净 |
@@ -427,6 +433,7 @@ unraid-sage/
 - [ ] OUTPUT_MODE 后端校验枚举值，非法值自动回退 `file`
 - [ ] 下载接口为专用端点 `download-advice.php`，无通用文件下载接口
 - [ ] 下载时 Content-Disposition 指定文件名，不可通过参数篡改路径
+- [ ] 设置页"立即运行"按钮使用与 cron 相同的锁策略，锁定状态跳过并提示
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
