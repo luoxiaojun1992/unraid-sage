@@ -36,12 +36,23 @@
 - **主页面** (`ai-advisor.page`): 显示最近一次采集时间、AI 建议卡片列表（按严重程度排序）
 - **设置页面** (`ai-advisor.settings.page`): 配置 API endpoint / api_key / model / cron 表达式
 
-### 1.4 用户可配置项
+### 1.4 历史建议缓存与清理
+
+AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（USB 持久存储），每次采集生成一个带时间戳的文件 `advice-YYYY-MM-DD-HHMM.json`。
+
+**清理机制：**
+- **上限淘汰**: 只保留最近 N 条历史记录，超出时删除最旧的
+- **触发时机**: 每次新的建议写入后执行清理
+- **USB 保护**: 清理操作只在添加新记录后触发一次，不额外产生写入
+- **来源限定**: 只清理本插件 `data/` 目录下的 `advice-*.json` 文件
+
+### 1.5 用户可配置项
 
 - API Endpoint URL（默认 `http://localhost:11434/v1/chat/completions`）
 - API Key（可选，非本地 API 需要）
 - Model 名称（本地 Ollama 默认 `qwen2.5:7b`）
 - Cron 定时表达式（默认 `0 */6 * * *` 每 6 小时）
+- 历史建议保留条数（默认 `30`，USB 空间保护，设 `0` 表示不保留）
 - 启用/禁用
 
 ---
@@ -60,8 +71,8 @@
 │  └─ advisor-daemon.sh → 定时循环调度              │
 ├──────────────────────────────────────────────────┤
 │  配置文件 /boot/config/plugins/ai-advisor/        │
-│  ├─ ai-advisor.cfg (API 配置/定时表达式)          │
-│  └─ data/ (历史建议缓存)                          │
+│  ├─ ai-advisor.cfg (API 配置/定时表达式/保留条数)  │
+│  └─ data/ (历史建议缓存, 保留最近 N 条, 自动淘汰)  │
 ├──────────────────────────────────────────────────┤
 │  运行时 /tmp/ai-advisor/                          │
 │  ├─ last-stats.json (最近一次采集数据)             │
@@ -89,9 +100,10 @@ driver_loaded → starting → array_started → disks_mounted
 ```
 [System] --每6小时(默认)--> collect-stats.sh --JSON--> query-ai.sh --POST--> AI API
                                       ↑                          ↓
-                                  advisor-daemon.sh       last-advice.json
-                                      ↑                          ↓
-                                  cron 调度              WebGUI PHP 读取展示
+                                  advisor-daemon.sh       存档 advice-*.json
+                                      ↑                       + 清理淘汰旧记录
+                                  cron 调度                      ↓
+                                                         WebGUI PHP 读取展示
 ```
 
 ---
@@ -116,10 +128,12 @@ driver_loaded → starting → array_started → disks_mounted
 - 兼容服务: Ollama / OpenRouter / Groq / vLLM / 任何 OpenAI 兼容 API
 - 认证: Bearer Token（API Key 非必填，本地 Ollama 不需要）
 
-### 3.3 安全设计
+### 3.3 安全与持久化设计
 
 - API Key 明文存储到 `/boot/config/plugins/ai-advisor/ai-advisor.cfg`（Unraid 插件标准做法）
 - 采集脚本不写入源文件系统，只输出到 `/tmp/`（RAM）
+- 历史建议缓存写入 USB（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
+- USB 写保护: 清理操作只在添加新记录时触发，不额外产生独立写入周期
 - 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
 ---
@@ -212,6 +226,9 @@ unraid-sage/
 | 同测试 | severity 值域正确 | `jq '.[].severity'` 验证 in (high,medium,low) |
 | `test_daemon.sh` | daemon start/stop/status 正常 | 验证 PID 文件 |
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
+| `test_cleanup.sh` | 历史缓存超过 N 条时正确淘汰 | 生成 N+1 条，验证只剩 N 条 |
+| 同测试 | n=0 时不保留历史 | 生成后检查 data/ 为空 |
+| 同测试 | 不误删非 advice 文件 | data/ 中放其他文件，验证未被删除 |
 
 ### 6.2 集成测试
 
@@ -248,6 +265,8 @@ unraid-sage/
 - [ ] 设置页面所有配置项保存后生效
 - [ ] 修改 cron 表达式后，下次调度按新表达式执行
 - [ ] AI API 不可用时，不清除已有的建议数据
+- [ ] 历史建议缓存达到上限后自动淘汰最旧记录，保留条数与配置一致
+- [ ] 设保留数为 0 时不写入任何历史缓存
 - [ ] 插件卸载后 `/usr/local/emhttp/plugins/ai-advisor/` 完全清除
 - [ ] 插件重装后配置文件保留（`/boot/config/plugins/ai-advisor/`）
 
