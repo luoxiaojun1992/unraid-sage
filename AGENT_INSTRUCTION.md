@@ -1,0 +1,271 @@
+# Unraid Sage — Agent Instruction
+
+## 项目概述
+
+**Unraid Sage** 是一个 Unraid 系统插件（Plugin），定时采集系统运行状态（CPU、内存、磁盘、Docker、网络等），通过 OpenAI 兼容 API 获取 AI 优化建议，并在 Unraid WebGUI 中展示。
+
+---
+
+## 1. 功能需求
+
+### 1.1 系统状态采集
+
+| 类别 | 具体采集项 | 采集命令 |
+|------|-----------|---------|
+| CPU | load average (1/5/15m)、核心数、温度 | `/proc/loadavg`, `/sys/class/thermal/*/temp`, `nproc` |
+| 内存 | total / used / available / swap | `free -b` 或 `/proc/meminfo` |
+| 磁盘 | 每块盘使用率、文件系统、挂载点、SMART 状态 | `df -B1`, `smartctl`（如可用） |
+| 阵列 | 总容量 / 已用 / 可用、校验盘、缓存池 | `/var/local/emhttp/var.ini` |
+| Docker | 容器总数、运行/停止数、各容器状态 | `docker ps -a --format json`, `docker stats --no-stream` |
+| 网络 | 接口列表、IP、MTU、流量 | `ip -j addr`, `/proc/net/dev` |
+| 系统 | 运行时间、Unraid 版本、内核版本 | `uptime`, `/etc/unraid-version`, `uname -r` |
+
+### 1.2 AI 分析
+
+- 采集的状态数据格式化为 JSON，通过 OpenAI Chat Completions API 发送
+- API 格式兼容 Ollama、OpenRouter、Groq、vLLM 等
+- 要求 AI 返回结构化建议，含以下字段：
+  - `severity`: `high` / `medium` / `low`
+  - `category`: `performance` / `storage` / `security` / `other`
+  - `title`: 建议标题
+  - `description`: 问题描述
+  - `suggestion`: 具体优化建议
+
+### 1.3 WebGUI 展示
+
+- **主页面** (`ai-advisor.page`): 显示最近一次采集时间、AI 建议卡片列表（按严重程度排序）
+- **设置页面** (`ai-advisor.settings.page`): 配置 API endpoint / api_key / model / cron 表达式
+
+### 1.4 用户可配置项
+
+- API Endpoint URL（默认 `http://localhost:11434/v1/chat/completions`）
+- API Key（可选，非本地 API 需要）
+- Model 名称（本地 Ollama 默认 `qwen2.5:7b`）
+- Cron 定时表达式（默认 `0 */6 * * *` 每 6 小时）
+- 启用/禁用
+
+---
+
+## 2. 架构
+
+```
+┌──────────────────────────────────────────────────┐
+│  WebGUI (PHP .page)                               │
+│  ├─ 主页面: 展示上次采集时间 + AI 建议列表        │
+│  └─ 设置页: API endpoint/key/model/定时配置       │
+├──────────────────────────────────────────────────┤
+│  后端脚本 (Shell + jq)                            │
+│  ├─ collect-stats.sh → JSON (CPU/内存/磁盘/Docker)│
+│  ├─ query-ai.sh → POST AI API → 保存建议         │
+│  └─ advisor-daemon.sh → 定时循环调度              │
+├──────────────────────────────────────────────────┤
+│  配置文件 /boot/config/plugins/ai-advisor/        │
+│  ├─ ai-advisor.cfg (API 配置/定时表达式)          │
+│  └─ data/ (历史建议缓存)                          │
+├──────────────────────────────────────────────────┤
+│  运行时 /tmp/ai-advisor/                          │
+│  ├─ last-stats.json (最近一次采集数据)             │
+│  └─ last-advice.json (最近一次 AI 建议)           │
+└──────────────────────────────────────────────────┘
+```
+
+### 启动时序
+
+Unraid 启动顺序：
+
+```
+driver_loaded → starting → array_started → disks_mounted
+  → svcs_restarted → docker_started → libvirt_started → started
+```
+
+本插件在 `event/started`（系统完全就绪）时启动后台 daemon。Daemon 启动后按 cron 表达式定时调度采集/分析任务。
+
+### 事件钩子
+
+- `event/started`: 阵列启动完成 → 启动 advisor-daemon.sh
+
+### 数据流
+
+```
+[System] --每6小时(默认)--> collect-stats.sh --JSON--> query-ai.sh --POST--> AI API
+                                      ↑                          ↓
+                                  advisor-daemon.sh       last-advice.json
+                                      ↑                          ↓
+                                  cron 调度              WebGUI PHP 读取展示
+```
+
+---
+
+## 3. 技术方案
+
+### 3.1 技术栈
+
+| 组件 | 技术 | 理由 |
+|------|------|------|
+| 安装器 | XML `.plg` 格式 | Unraid 标准插件格式 |
+| WebGUI | PHP `.page` 文件 | Unraid WebGUI 原生支持 |
+| 前端交互 | JavaScript | Unraid 内置 jQuery |
+| 数据采集 | Shell 脚本 | 零依赖，Unraid 原生支持 |
+| JSON 处理 | `jq` | Unraid 自带 |
+| HTTP 请求 | `curl` | Unraid 自带 |
+| **无额外依赖** | 仅用 Unraid 自带工具 | 方便用户安装 |
+
+### 3.2 AI API 兼容性
+
+- 协议: OpenAI Chat Completions (`POST /v1/chat/completions`)
+- 兼容服务: Ollama / OpenRouter / Groq / vLLM / 任何 OpenAI 兼容 API
+- 认证: Bearer Token（API Key 非必填，本地 Ollama 不需要）
+
+### 3.3 安全设计
+
+- API Key 明文存储到 `/boot/config/plugins/ai-advisor/ai-advisor.cfg`（Unraid 插件标准做法）
+- 采集脚本不写入源文件系统，只输出到 `/tmp/`（RAM）
+- 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
+
+---
+
+## 4. 目录结构
+
+```
+unraid-sage/
+├── AGENT_INSTRUCTION.md         # 本文件
+├── ai-advisor.plg               # ↑ 安装器（构建时生成到根目录）
+├── source/                      # ↓ 源文件目录
+│   ├── default.cfg              #   默认配置
+│   ├── scripts/
+│   │   ├── collect-stats.sh     #   系统状态采集
+│   │   ├── query-ai.sh          #   AI API 调用
+│   │   └── advisor-daemon.sh    #   后台守护进程
+│   ├── event/
+│   │   └── started              #   阵列启动钩子
+│   ├── pages/
+│   │   ├── ai-advisor.page      #   WebGUI 主页面
+│   │   └── ai-advisor.settings.page  # 设置页面
+│   ├── javascript/
+│   │   └── advisor.js           #   WebGUI JS
+│   └── styles/
+│       └── advisor.css          #   WebGUI CSS
+└── tests/                       # 测试脚本
+    ├── test_collect_stats.sh    #   采集脚本测试
+    └── test_query_ai.sh         #   AI 接口测试
+```
+
+### 部署路径（安装后）
+
+| 源路径 | 部署路径 |
+|--------|---------|
+| `ai-advisor.plg` | `/boot/config/plugins/ai-advisor.plg` |
+| `source/default.cfg` | `/boot/config/plugins/ai-advisor/default.cfg` |
+| `source/scripts/*` | `/usr/local/emhttp/plugins/ai-advisor/scripts/` |
+| `source/event/*` | `/usr/local/emhttp/plugins/ai-advisor/event/` |
+| `source/pages/*` | `/usr/local/emhttp/plugins/ai-advisor/` |
+| `source/javascript/*` | `/usr/local/emhttp/plugins/ai-advisor/javascript/` |
+| `source/styles/*` | `/usr/local/emhttp/plugins/ai-advisor/styles/` |
+
+---
+
+## 5. 编码规范
+
+### 5.1 Shell 脚本
+
+- **Shebang**: 所有脚本以 `#!/bin/bash` 开头
+- **错误处理**: 每个可能失败的命令后检查 `$?`，失败时写日志并退出
+- **变量命名**: 小写 + 下划线，如 `cpu_load`, `total_mem`
+- **常量**: 大写 + 下划线，如 `CONFIG_DIR="/boot/config/plugins/ai-advisor"`
+- **函数命名**: 小写 + 下划线，如 `collect_cpu_stats()`
+- **引号**: 所有变量引用必须加双引号 `"$var"`
+- **临时文件**: 统一写到 `/tmp/ai-advisor/`，用完清理
+- **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
+
+### 5.2 PHP (.page)
+
+- **风格**: 遵循 Unraid WebGUI 的 PHP + HTML 混合风格
+- **无外部 PHP 框架**: 只用 Unraid 内置的 PHP 函数
+- **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出
+- **配置读取**: 通过 `parse_ini_file()` 读取 `.cfg` 文件
+- **表单处理**: 提交后 `exec()` 调用后台脚本更新配置
+
+### 5.3 JavaScript
+
+- **使用 jQuery**: Unraid WebGUI 内置 jQuery
+- **AJAX 请求**: 通过 `$.get()` 或 `$.post()` 读取 JSON 数据
+- **DOM 操作**: 仅操作插件域内的元素（`.ai-advisor-*` 前缀）
+
+### 5.4 CSS
+
+- **命名空间**: 所有 class 以 `ai-advisor-` 前缀
+- **Unraid 风格**: 参考 Unraid WebGUI 现有样式，保持一致
+
+---
+
+## 6. 测试用例
+
+### 6.1 单元测试 (Shell)
+
+| 测试用例 | 验证内容 | 命令 |
+|---------|---------|------|
+| `test_collect_stats.sh` | collect-stats.sh 输出合法 JSON | `jq . /tmp/ai-advisor/last-stats.json` |
+| 同测试 | JSON 包含所有必要字段 | `jq 'has("cpu","memory","disk","docker","network","system")'` |
+| 同测试 | 各字段值不为空 | 逐个字段验证非空 |
+| `test_query_ai.sh` | query-ai.sh 输出合法 JSON | `jq . /tmp/ai-advisor/last-advice.json` |
+| 同测试 | 建议包含 severity/category/title/description/suggestion | 逐个字段验证 |
+| 同测试 | severity 值域正确 | `jq '.[].severity'` 验证 in (high,medium,low) |
+| `test_daemon.sh` | daemon start/stop/status 正常 | 验证 PID 文件 |
+| 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
+
+### 6.2 集成测试
+
+| 测试场景 | 验证点 |
+|---------|--------|
+| 插件安装 | `.plg` 安装成功，文件部署到正确位置 |
+| 阵列启动 | daemon 自动启动，PID 文件存在 |
+| 定时采集 | 到 cron 时间点，`last-stats.json` 更新 |
+| AI 分析 | 有建议输出，WebGUI 正常展示 |
+| 配置修改 | 修改 API endpoint，下次采集生效 |
+| 插件卸载 | 所有文件清理干净 |
+| 重新安装 | 配置保留（`/boot/config/plugins/` 中的文件不删） |
+
+### 6.3 异常场景
+
+| 场景 | 预期行为 |
+|------|---------|
+| AI API 不可用 | `query-ai.sh` 超时退出，写 error 日志，不清除上次建议 |
+| Docker 未运行 | `collect-stats.sh` 跳过 Docker 部分，正常输出其他指标 |
+| 磁盘未挂载 | `collect-stats.sh` 跳过对应磁盘，不报错退出 |
+| API Key 为空且 endpoint 非本地 | 设置页提示警告 |
+| cron 表达式格式非法 | daemon 使用默认值，写 warning 日志 |
+| `jq` 不可用 | 脚本检测依赖，输出友好错误 |
+
+---
+
+## 7. 验收标准
+
+- [ ] 插件安装后，无需手动干预，daemon 随系统启动自动运行
+- [ ] 每次 cron 触发后，`/tmp/ai-advisor/last-stats.json` 正确更新
+- [ ] `last-stats.json` 包含 CPU/内存/磁盘/阵列/Docker/网络/系统 全部指标
+- [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议
+- [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片
+- [ ] 设置页面所有配置项保存后生效
+- [ ] 修改 cron 表达式后，下次调度按新表达式执行
+- [ ] AI API 不可用时，不清除已有的建议数据
+- [ ] 插件卸载后 `/usr/local/emhttp/plugins/ai-advisor/` 完全清除
+- [ ] 插件重装后配置文件保留（`/boot/config/plugins/ai-advisor/`）
+
+---
+
+## 8. 开发准则（重要）
+
+1. **先调查，再动手** — 任何修改前，先阅读相关文档和现有代码，理解上下文
+2. **最小修改原则** — 只改必须改的地方，不做非必要的重构或优化
+3. **单一职责** — 每个脚本/函数只做一件事
+4. **不引入额外依赖** — 只使用 Unraid 自带工具（bash, curl, jq, php）
+5. **错误容错** — 局部失败不影响整体，不因一个指标采集失败而退出
+6. **可回溯** — 所有操作记录日志，方便排查
+7. **每次修改后验证** — 运行测试用例确认改动正确
+8. **提交粒度** — 每个独立功能一次 commit，message 清晰写明做了什么
+
+### 优先级
+
+```
+P0: 插件框架 + 采集脚本 → P1: AI 接口对接 → P2: 守护进程 → P3: WebGUI → P4: 测试
+```
