@@ -14,13 +14,13 @@
 |------|-----------|---------|---------|
 | CPU | load average (1/5/15m)、核心数、温度 | `/proc/loadavg`, `/sys/class/thermal/*/temp`, `nproc` | 无敏感信息 |
 | 内存 | total / used / available / swap | `free -b` 或 `/proc/meminfo` | 无敏感信息 |
-| 磁盘 | 每块盘使用率、文件系统、挂载点、总容量 | `df -B1` | 挂载路径仅保留 `/mnt/user/sharename` 级别的名称，不包含 UUID 或序列号；跳过 SMART 原始值 |
+| 磁盘 | 每块盘使用率、文件系统、总容量 | `df -B1` | **不包含**挂载点路径和 UUID、序列号；跳过 SMART 原始值 |
 | 阵列 | 总容量 / 已用 / 可用、校验盘类型、缓存池配置 | `/var/local/emhttp/var.ini` | 不包含磁盘序列号 |
-| Docker | 容器总数、运行/停止数、各容器名称/状态 | `docker ps -a --format json` | **不发送**端口映射、环境变量、挂载卷路径 |
+| Docker | 容器总数、运行数/停止数、各容器镜像名和 CPU/内存占用 | `docker ps -a --format json`, `docker stats --no-stream` | **不发送**容器名称、端口映射、环境变量、挂载卷路径、网络设置 |
 | 网络 | 接口名称、MTU、是否 UP | `ip -j addr` | **不发送** IP 地址和 MAC 地址，仅接口名和状态 |
 | 系统 | 运行时间、Unraid 版本、内核版本 | `uptime`, `/etc/unraid-version`, `uname -r` | 无敏感信息 |
 
-> ⚠️ **隐私说明**: 采集的数据发送到远程 AI API 时会离开内网。所有 IP 地址、磁盘序列号、Docker 端口映射和环境变量已在采集层剔除。推荐优先使用本地 Ollama 以避免数据外发。
+> ⚠️ **隐私说明**: 采集的数据发送到远程 AI API 时会离开内网。所有 IP 地址、容器名称、系统路径、磁盘序列号、Docker 端口映射和环境变量已在采集层剔除。推荐优先使用本地 Ollama 以避免数据外发。
 
 ### 1.2 AI 分析
 
@@ -175,6 +175,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 - 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
 - 清理仅在添加新记录时触发，不产生额外独立写入周期
 - **原子写入**: `last-stats.json` 和 `last-advice.json`（运行时文件，供 WebGUI 实时读取）必须使用临时文件 + mv 的方式写入 — 先写 `.tmp` 后缀文件，完成后 `mv` 覆盖目标文件，确保 WebGUI PHP 不会读到半截写的中间状态
+- **AI 建议防 XSS**: AI 返回的建议内容（`title`、`description`、`suggestion` 字段）不可信任，可能包含 HTML/脚本。写入 JSON 文件时 PHP 做 `htmlspecialchars()` 转义；前端 JS 用 `textContent`（而非 `innerHTML`）渲染
 - **配置文件同样原子写入**: `ai-advisor.cfg` 也使用 `.tmp + mv` 模式写入，避免 PHP 写入中断导致 `parse_ini_file()` 解析失败
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/tmp/ai-advisor/`、`/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
@@ -251,6 +252,8 @@ unraid-sage/
     ├── test_clear_lock.sh       #   手动清除锁测试
     ├── test_timeout.sh          #   超时保护测试
     ├── test_advice_timestamp.sh #   建议时间戳测试
+    ├── test_xss_prevention.sh   #   XSS 防护测试
+    ├── test_desensitization.sh  #   数据脱敏测试
     └── test_cleanup.sh          #   缓存清理测试
 ```
 
@@ -289,7 +292,7 @@ unraid-sage/
 
 - **风格**: 遵循 Unraid WebGUI 的 PHP + HTML 混合风格
 - **无外部 PHP 框架**: 只用 Unraid 内置的 PHP 函数
-- **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出
+- **安全性**: 所有用户输入通过 `htmlspecialchars()` 输出。AI 建议内容（`title`/`description`/`suggestion`）同样视为不可信输入，写入 JSON 和 HTML 输出时均需转义
 - **配置读取**: 通过 `parse_ini_file()` 读取 `.cfg` 文件
 - **配置写入**: 先写 `.tmp` 再 `mv` 覆盖原文件，与 Shell 端原子写规则一致
 - **表单处理**: 提交后 `exec()` 调用固定路径的 update-config.sh 脚本，不拼接用户输入
@@ -299,6 +302,7 @@ unraid-sage/
 - **使用 jQuery**: Unraid WebGUI 内置 jQuery
 - **AJAX 请求**: 通过 `$.get()` 或 `$.post()` 读取 JSON 数据
 - **DOM 操作**: 仅操作插件域内的元素（`.ai-advisor-*` 前缀）
+- **防 XSS**: 渲染 AI 建议内容时使用 `textContent` 而非 `innerHTML`，禁止将 AI 输出直接插入 HTML
 
 ### 5.4 CSS
 
@@ -319,6 +323,10 @@ unraid-sage/
 | `test_query_ai.sh` | query-ai.sh 输出合法 JSON | `jq . /tmp/ai-advisor/last-advice.json` |
 | 同测试 | 建议包含 severity/category/title/description/suggestion | 逐个字段验证 |
 | 同测试 | severity 值域正确 | `jq '.[].severity'` 验证 in (high,medium,low) |
+| `test_xss_prevention.sh` | AI 建议中的 HTML 标签被正确转义 | 注入 `<script>alert(1)</script>`，验证输出为 `&lt;script&gt;` |
+| 同测试 | PHP `htmlspecialchars()` 双编码测试 | 验证 `&` 不被二次转义 |
+| `test_desensitization.sh` | 发送给 AI 的 JSON 不含容器名称 | `jq '..|.name? // empty'` 应只有镜像名 |
+| 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
 | `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
 | 同测试 | 写入完成后 .tmp 后缀文件已清除 | `ls /tmp/ai-advisor/*.tmp` 应为空 |
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
@@ -376,6 +384,9 @@ unraid-sage/
 - [ ] 每次 cron 触发后，`/tmp/ai-advisor/last-stats.json` 正确更新
 - [ ] `last-stats.json` 包含 CPU/内存/磁盘/阵列/Docker/网络/系统 全部指标
 - [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议，含 `collected_at` 和 `advice_at` 时间戳
+- [ ] AI 建议中的 `title`/`description`/`suggestion` 经过 HTML 转义，不会因 AI 返回内容触发 XSS
+- [ ] 前端渲染 AI 建议时使用 `textContent`，不使用 `innerHTML`
+- [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入完成后 `/tmp/ai-advisor/` 下无 `.tmp` 残留文件
