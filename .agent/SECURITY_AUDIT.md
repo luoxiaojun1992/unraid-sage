@@ -115,15 +115,16 @@
 **位置**: §1.1 磁盘采集使用 smartctl
 **建议**: 在 `collect-stats.sh` 中检测 smartctl 是否可执行并返回合法数据，不可用时优雅降级（跳过 SMART、采集其他磁盘指标），而不是报错退出。
 
-### P2-3: cron 表达式注入风险
+### P2-3: cron 表达式校验
+**状态**: 🔧 需修复 — 见 §5.2
 
-**位置**: §1.5 用户可配置 Cron 表达式
-**建议**: Shell 脚本在设置 cron 前校验表达式格式（至少有 5 个字段、字段值域合法），拒绝非法表达式而不只是"使用默认值"。
+**背景**: Unraid 的 Dynamix Scheduler 提供了预设下拉菜单（Hourly/Daily/Weekly/Monthly/Custom），本身无校验能力。自定义输入需要插件自己做校验。
+**修复要求**: 设置页使用 Dynamix Scheduler 风格的下拉菜单（预设 + Custom 自由输入），对 Custom 输入做基本格式校验（5 字段 + 值域范围）
 
 ### P2-4: kill 信号类型
 **状态**: 🔧 需修复 — 见 §3.4
 
-**建议**: `clear-lock.sh` 中使用 `kill -TERM $PID` 替代裸 `kill`（裸 kill 在某些 shell 中可能映射为 SIGKILL）
+**修复要求**: `clear-lock.sh` 先 `kill -TERM $PID` 等待 5 秒，如果进程仍存活则 `kill -KILL $PID`
 
 ### P2-5: 日志中不应包含 shell 命令输出
 
@@ -136,7 +137,8 @@
 
 | 优先级 | 编号 | 内容 | 状态 |
 |--------|------|------|------|
-| 立即 | P1-2 | 发送给 AI 的数据最小化 | 需改 AGENT_INSTRUCTION §1.2 |
-| 立即 | P1-3 | 配置文件原子写入 | 需改 AGENT_INSTRUCTION §3.3/§5.2 |
-| 立即 | P1-4 | 卸载清理 /tmp | 需改 AGENT_INSTRUCTION §3.3 |
-| 顺便 | P2-4 | kill → kill -TERM | 需改 AGENT_INSTRUCTION §3.4 |
+| 立即 | P1-2 | 发送给 AI 的数据最小化 | ✅ 已修复 |
+| 立即 | P1-3 | 配置文件原子写入 | ✅ 已修复 |
+| 立即 | P1-4 | 卸载清理 /tmp | ✅ 已修复 |
+| 顺便 | P2-3 | cron 表达式校验（设置页 + 后端） | ✅ 已修复 |
+| 顺便 | P2-4 | SIGTERM → 等待 5s → SIGKILL | ✅ 已修复 |

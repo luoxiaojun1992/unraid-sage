@@ -45,7 +45,9 @@
   - 最近一次采集时间
   - 当前锁状态（运行中/空闲/异常锁定），如果异常锁定显示"清除锁"按钮
 - **设置页面** (`ai-advisor.settings.page`):
-  - 配置 API endpoint / api_key / model / cron 表达式
+  - 配置 API endpoint / api_key / model
+  - 计划任务：采用 Dynamix Scheduler 风格的下拉菜单（Disabled / Hourly / Daily / Weekly / Monthly / Custom）
+  - Custom 模式提供自由输入框，提交时做基本格式校验（5 字段、值域在合法范围内）
   - **手动清除锁**按钮 + 当前锁状态指示（锁定中的 PID、进程名、进程是否存活）
   - 清除逻辑：读取锁中 PID → `ps -p $PID -o comm=` 确认进程名含 `ai-sage` → 只有 PID **和** 进程名都匹配时才 `kill` + 删除锁文件 → 否则只写 warning 日志不执行清除
   - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared: killed pid $PID (ai-sage)"`
@@ -206,7 +208,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 1. 读取 `daemon.lock` 中的 PID
 2. 锁文件不存在 → `logger -t ai-advisor "clear-lock: no lock file"` → 退出
 3. 锁存在 → 执行 `ps -p $PID -o comm=` 获取进程名
-4. **PID 存活 + 进程名包含 ai-sage** → `kill -TERM $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
+4. **PID 存活 + 进程名包含 ai-sage** → `kill -TERM $PID` → 等待 3 秒 → 检查进程是否仍存活 → 存活则 `kill -KILL $PID` → 删除 `daemon.lock` → 记日志
 5. **PID 存活但进程名不含 ai-sage** → 只删除 `daemon.lock`，不 kill → `logger -t ai-advisor "clear-lock: removed stale lock, pid $PID belongs to $actual_name, not killed"`
 6. **PID 已死** → 直接删除 `daemon.lock` → 记日志
 
