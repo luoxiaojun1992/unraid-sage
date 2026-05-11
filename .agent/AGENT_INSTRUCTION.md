@@ -38,12 +38,12 @@
 
 ### 1.4 历史建议缓存与清理
 
-AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（USB 持久存储），每次采集生成一个带时间戳的文件 `advice-YYYY-MM-DD-HHMM.json`。
+AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久存储，支持 USB 或 SSD），每次采集生成一个带时间戳的文件 `advice-YYYY-MM-DD-HHMM.json`。
 
 **清理机制：**
 - **上限淘汰**: 只保留最近 N 条历史记录，超出时删除最旧的
 - **触发时机**: 每次新的建议写入后执行清理
-- **USB 保护**: 清理操作只在添加新记录后触发一次，不额外产生写入
+- **低开销**: 清理操作只在添加新记录后触发一次，不额外产生独立写入周期
 - **来源限定**: 只清理本插件 `data/` 目录下的 `advice-*.json` 文件
 
 ### 1.5 用户可配置项
@@ -52,7 +52,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（USB 持久存
 - API Key（可选，非本地 API 需要）
 - Model 名称（本地 Ollama 默认 `qwen2.5:7b`）
 - Cron 定时表达式（默认 `0 */6 * * *` 每 6 小时）
-- 历史建议保留条数（默认 `30`，USB 空间保护，设 `0` 表示不保留）
+- 历史建议保留条数（默认 `30`，设 `0` 表示不保留历史）
 - 启用/禁用
 
 ---
@@ -132,8 +132,8 @@ driver_loaded → starting → array_started → disks_mounted
 
 - API Key 明文存储到 `/boot/config/plugins/ai-advisor/ai-advisor.cfg`（Unraid 插件标准做法）
 - 采集脚本不写入源文件系统，只输出到 `/tmp/`（RAM）
-- 历史建议缓存写入 USB（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
-- USB 写保护: 清理操作只在添加新记录时触发，不额外产生独立写入周期
+- 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
+- 清理仅在添加新记录时触发，不产生额外独立写入周期
 - 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
 ---
