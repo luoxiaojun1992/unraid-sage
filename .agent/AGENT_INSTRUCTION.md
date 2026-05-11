@@ -30,11 +30,22 @@
   - `title`: 建议标题
   - `description`: 问题描述
   - `suggestion`: 具体优化建议
+- `last-advice.json` 顶层字段包含 `collected_at`（采集时间戳）和 `advice_at`（AI 返回时间戳）
+- 历史缓存文件 `advice-YYYY-MM-DD-HHMM.json` 文件体内也包含时间戳字段，文件名仅作排序和辨识用
 
 ### 1.3 WebGUI 展示
 
-- **主页面** (`ai-advisor.page`): 显示最近一次采集时间、AI 建议卡片列表（按严重程度排序）
-- **设置页面** (`ai-advisor.settings.page`): 配置 API endpoint / api_key / model / cron 表达式
+- **主页面** (`ai-advisor.page`):
+  - AI 建议卡片列表（按严重程度排序），每条卡片显示：
+    - 标题、描述、建议内容
+    - 生成时间戳（`advice_at`）
+    - 对应的采集时间戳（`collected_at`）
+  - 最近一次采集时间
+  - 当前锁状态（运行中/空闲/异常锁定），如果异常锁定显示"清除锁"按钮
+- **设置页面** (`ai-advisor.settings.page`):
+  - 配置 API endpoint / api_key / model / cron 表达式
+  - **手动清除锁**按钮 + 当前锁状态指示（锁定中的 PID、进程是否存活）
+  - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared by user"`
 
 ### 1.4 历史建议缓存与清理
 
@@ -75,6 +86,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 │  └─ data/ (历史建议缓存, 保留最近 N 条, 自动淘汰)  │
 ├──────────────────────────────────────────────────┤
 │  运行时 /tmp/ai-advisor/                          │
+│  ├─ daemon.lock (PID 锁文件, 防重复执行)           │
 │  ├─ last-stats.json (最近一次采集数据, 原子写入)    │
 │  └─ last-advice.json (最近一次 AI 建议, 原子写入)  │
 └──────────────────────────────────────────────────┘
@@ -98,13 +110,22 @@ driver_loaded → starting → array_started → disks_mounted
 ### 数据流
 
 ```
-[System] --每6小时(默认)--> collect-stats.sh --JSON--> query-ai.sh --POST--> AI API
-                                      ↑                          ↓
-                                  advisor-daemon.sh    写入 .tmp → mv 原子重命名
-                                      ↑                    last-advice.json
-                                  cron 调度                      ↓
-                                                         WebGUI PHP 读取展示
-                                                         (始终读到完整数据)
+cron 触发
+  │
+  ├─ advisor-daemon.sh 检查 daemon.lock
+  │   ├─ 锁存在 + PID 存活 → 跳过本轮（防重叠）
+  │   └─ 锁不存在 / 锁存在但 PID 已死 → 写锁 → 继续
+  │
+  ├─ collect-stats.sh --JSON--> last-stats.json (原子写入)
+  │
+  ├─ query-ai.sh --POST--> AI API → last-advice.json (含时间戳, 原子写入)
+  │                              + data/advice-*.json (历史存档, 含时间戳)
+  │                              + 清理淘汰旧记录
+  │
+  └─ 释放锁 (删除 daemon.lock)
+
+WebGUI PHP 读取 last-advice.json / data/ 目录展示
+         + 读取 daemon.lock 状态展示锁状态
 ```
 
 ---
@@ -139,6 +160,26 @@ driver_loaded → starting → array_started → disks_mounted
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
+### 3.4 文件锁机制（防重复执行）
+
+**目的**: 避免 cron 周期短于 AI API 响应时间时，前后两次执行重叠。
+
+**实现方式**:
+- 锁文件: `/tmp/ai-advisor/daemon.lock`
+- 锁内容: 写入执行中的进程 PID
+- 获取锁:
+  1. 检查 `daemon.lock` 是否存在
+  2. 不存在 → 写入当前 PID → 获得锁
+  3. 存在 → 读取 PID → 检查 `/proc/$PID/` 是否存活
+  4. PID 存活 → 跳过本轮，写 warning 日志
+  5. PID 已死（上次异常退出） → 覆盖写入当前 PID → 获得锁
+- 释放锁: 本轮执行完成后删除 `daemon.lock`
+
+**异常处理**:
+- 如果 daemon 在持有锁时崩溃（kill -9、系统重启等），锁文件残留含已死 PID
+- 下次 cron 触发时，检测到 PID 不存活，自动覆盖锁继续执行（自愈）
+- 极端情况用户可通过设置页的"清除锁"按钮手动删除 `daemon.lock`
+
 ---
 
 ## 4. 目录结构
@@ -152,7 +193,8 @@ unraid-sage/
 │   ├── scripts/
 │   │   ├── collect-stats.sh     #   系统状态采集
 │   │   ├── query-ai.sh          #   AI API 调用
-│   │   └── advisor-daemon.sh    #   后台守护进程
+│   │   ├── advisor-daemon.sh    #   后台守护进程（含锁管理）
+│   │   └── clear-lock.sh        #   手动清除锁（设置页调用）
 │   ├── event/
 │   │   └── started              #   阵列启动钩子
 │   ├── pages/
@@ -167,6 +209,8 @@ unraid-sage/
     ├── test_query_ai.sh         #   AI 接口测试
     ├── test_daemon.sh           #   守护进程测试
     ├── test_atomic_write.sh     #   原子写入测试
+    ├── test_lock.sh             #   文件锁测试
+    ├── test_advice_timestamp.sh #   建议时间戳测试
     └── test_cleanup.sh          #   缓存清理测试
 ```
 
@@ -196,6 +240,7 @@ unraid-sage/
 - **引号**: 所有变量引用必须加双引号 `"$var"`
 - **临时文件**: 统一写到 `/tmp/ai-advisor/`，用完清理
 - **原子写入**: 运行时 JSON 文件（`last-stats.json`、`last-advice.json`）必须通过 `写 .tmp → mv` 的方式写入，禁止直接 overwrite
+- **锁文件**: 所有获取锁的操作必须做 PID 存活检测（`kill -0 $pid` 或检查 `/proc/$pid/`），禁止仅因文件存在就阻塞
 - **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
 
 ### 5.2 PHP (.page)
@@ -236,6 +281,11 @@ unraid-sage/
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
 | `test_daemon.sh` | daemon start/stop/status 正常 | 验证 PID 文件 |
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
+| `test_lock.sh` | 锁文件存在且 PID 存活时跳过执行 | 伪造锁文件 + 存活的 PID(cron)，验证跳过 |
+| 同测试 | 锁文件存在但 PID 已死时自动覆盖 | 伪造锁文件 + 已死的 PID，验证重新执行 |
+| 同测试 | 锁文件被手动清除后能正常执行 | 删除锁文件后验证 cron 可正常触发 |
+| `test_advice_timestamp.sh` | last-advice.json 包含 collected_at 和 advice_at | `jq 'has("collected_at","advice_at")'` |
+| 同测试 | 历史缓存文件体内也包含时间戳 | 随机检查一个 history 文件 |
 | `test_cleanup.sh` | 历史缓存超过 N 条时正确淘汰 | 生成 N+1 条，验证只剩 N 条 |
 | 同测试 | n=0 时不保留历史 | 生成后检查 data/ 为空 |
 | 同测试 | 不误删非 advice 文件 | data/ 中放其他文件，验证未被删除 |
@@ -256,7 +306,10 @@ unraid-sage/
 
 | 场景 | 预期行为 |
 |------|---------|
-| AI API 不可用 | `query-ai.sh` 超时退出，写 error 日志，不清除上次建议 |
+| AI API 不可用 | `query-ai.sh` 超时退出，写 error 日志，不清除上次建议，释放锁 |
+| cron 重叠触发（上次还没跑完） | daemon 检测锁 + PID 存活，跳过本轮，写 warning 日志 |
+| daemon 崩溃后锁残留 | 下次 cron 触发检测 PID 已死，自动覆盖锁继续执行 |
+| 锁被用户手动清除 | 清除日志记录，下次 cron 正常触发 |
 | Docker 未运行 | `collect-stats.sh` 跳过 Docker 部分，正常输出其他指标 |
 | 磁盘未挂载 | `collect-stats.sh` 跳过对应磁盘，不报错退出 |
 | API Key 为空且 endpoint 非本地 | 设置页提示警告 |
@@ -270,10 +323,14 @@ unraid-sage/
 - [ ] 插件安装后，无需手动干预，daemon 随系统启动自动运行
 - [ ] 每次 cron 触发后，`/tmp/ai-advisor/last-stats.json` 正确更新
 - [ ] `last-stats.json` 包含 CPU/内存/磁盘/阵列/Docker/网络/系统 全部指标
-- [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议
+- [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议，含 `collected_at` 和 `advice_at` 时间戳
+- [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入完成后 `/tmp/ai-advisor/` 下无 `.tmp` 残留文件
-- [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片
+- [ ] cron 重叠触发时自动跳过，不并发执行
+- [ ] daemon 崩溃后锁残留，下次 cron 自动恢复（检测 PID 已死 → 覆盖锁）
+- [ ] 设置页可查看锁状态（PID / 是否存活），支持手动清除锁
+- [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片，每条建议带时间戳
 - [ ] 设置页面所有配置项保存后生效
 - [ ] 修改 cron 表达式后，下次调度按新表达式执行
 - [ ] AI API 不可用时，不清除已有的建议数据
