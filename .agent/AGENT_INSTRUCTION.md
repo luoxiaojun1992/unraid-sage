@@ -44,8 +44,9 @@
   - 当前锁状态（运行中/空闲/异常锁定），如果异常锁定显示"清除锁"按钮
 - **设置页面** (`ai-advisor.settings.page`):
   - 配置 API endpoint / api_key / model / cron 表达式
-  - **手动清除锁**按钮 + 当前锁状态指示（锁定中的 PID、进程是否存活）
-  - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared by user"`
+  - **手动清除锁**按钮 + 当前锁状态指示（锁定中的 PID、进程名、进程是否存活）
+  - 清除逻辑：读取锁中 PID → `ps -p $PID -o comm=` 确认进程名含 `ai-sage` → 只有 PID **和** 进程名都匹配时才 `kill` + 删除锁文件 → 否则只写 warning 日志不执行清除
+  - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared: killed pid $PID (ai-sage)"`
 
 ### 1.4 历史建议缓存与清理
 
@@ -82,7 +83,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 │  ├─ advisor-daemon.sh (锁管理: 获取/释放/检测)            │
 │  ├─ collect-stats.sh → JSON (CPU/内存/磁盘/Docker)       │
 │  ├─ query-ai.sh → POST AI API → 含时间戳的建议           │
-│  └─ clear-lock.sh (设置页调用, 删除锁 + 记日志)           │
+│  └─ clear-lock.sh (设置页调用, 双重验证 PID+进程名后 kill + 删锁)│
 ├──────────────────────────────────────────────────────────┤
 │  配置文件 /boot/config/plugins/ai-advisor/                │
 │  ├─ ai-advisor.cfg (API 配置/定时表达式/保留条数)         │
@@ -116,16 +117,24 @@ driver_loaded → starting → array_started → disks_mounted
 cron 触发
   │
   ├─ advisor-daemon.sh 检查 daemon.lock
-  │   ├─ 锁存在 + PID 存活 → 跳过本轮（防重叠）
-  │   └─ 锁不存在 / 锁存在但 PID 已死 → 写锁 → 继续
+  │   ├─ 锁存在 + PID 存活 + 进程名含 ai-sage → 跳过本轮（防重叠）
+  │   └─ 锁不存在 / PID 已死 / 名不匹配 → 写锁 → 继续
   │
-  ├─ collect-stats.sh --JSON--> last-stats.json (原子写入)
+  ├─ timeout 30 collect-stats.sh --JSON--> last-stats.json (原子写入)
   │
-  ├─ query-ai.sh --POST--> AI API → last-advice.json (含时间戳, 原子写入)
-  │                              + data/advice-*.json (历史存档, 含时间戳)
-  │                              + 清理淘汰旧记录
+  ├─ timeout 120 query-ai.sh --POST--> AI API → last-advice.json (含时间戳, 原子写入)
+  │                                         + data/advice-*.json (历史存档, 含时间戳)
+  │                                         + timeout 10 清理淘汰旧记录
+  │
+  ├─ 总护闸: 超时 180s 强制释放锁
   │
   └─ 释放锁 (删除 daemon.lock)
+
+手动清除 (clear-lock.sh):
+  1. 读 daemon.lock → PID
+  2. ps -p $PID -o comm= → 进程名
+  3. PID 存活 + 进程名含 ai-sage → kill + 删锁 + 记日志
+  4. 否则 → 只记 warning，不执行
 
 WebGUI PHP 读取 last-advice.json / data/ 目录展示
          + 读取 daemon.lock 状态展示锁状态
@@ -170,18 +179,37 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 **实现方式**:
 - 锁文件: `/tmp/ai-advisor/daemon.lock`
 - 锁内容: 写入执行中的进程 PID
+- 进程标识: 所有 daemon 进程（advisor-daemon.sh 及其子任务）的进程名必须包含 `ai-sage` 标识
+  - `event/started` 通过 `exec -a ai-sage-advisor /bin/bash advisor-daemon.sh &` 启动
+  - 子任务脚本在各自入口通过 `exec -a ai-sage-<task> sh` 设置进程名
 - 获取锁:
   1. 检查 `daemon.lock` 是否存在
   2. 不存在 → 写入当前 PID → 获得锁
-  3. 存在 → 读取 PID → 检查 `/proc/$PID/` 是否存活
-  4. PID 存活 → 跳过本轮，写 warning 日志
-  5. PID 已死（上次异常退出） → 覆盖写入当前 PID → 获得锁
+  3. 存在 → 读取 PID → 检查 `/proc/$PID/` 是否存活 **且** 进程名包含 `ai-sage`
+  4. PID 存活 + 名匹配 → 跳过本轮，写 warning 日志
+  5. PID 已死或名不匹配 → 覆盖写入当前 PID → 获得锁（自愈）
 - 释放锁: 本轮执行完成后删除 `daemon.lock`
+
+**执行超时保护**（防止命令阻塞整个循环）:
+- 每个子步骤必须设置超时，使用 `timeout` 命令
+  - `collect-stats.sh`: 30 秒超时
+  - `query-ai.sh`: 120 秒超时（AI API 可能慢）
+  - 历史清理: 10 秒超时
+- 整个 cron 循环的总护闸: 180 秒后强制释放锁（避免锁永久残留）
+- 超时后的步骤标记为"跳过"，不清除已成功的前序步骤结果
+
+**手动清除锁（clear-lock.sh）**:
+1. 读取 `daemon.lock` 中的 PID
+2. 执行 `ps -p $PID -o comm=` 获取进程名
+3. **双重验证**: 仅当 `PID 存活` **且** `进程名包含 ai-sage` 时继续
+4. 通过 → `kill $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
+5. 不通过 → `logger -t ai-advisor "clear-lock aborted: pid $PID name mismatch ($actual_name)"` → 不执行任何操作
+6. 锁文件本身不存在 → `logger -t ai-advisor "clear-lock: no lock file"` → 退出
 
 **异常处理**:
 - 如果 daemon 在持有锁时崩溃（kill -9、系统重启等），锁文件残留含已死 PID
-- 下次 cron 触发时，检测到 PID 不存活，自动覆盖锁继续执行（自愈）
-- 极端情况用户可通过设置页的"清除锁"按钮手动删除 `daemon.lock`
+- 下次 cron 触发时，检测到 PID 不存活或名不匹配，自动覆盖锁继续执行（自愈）
+- 极端情况用户通过设置页手动清除（含双重验证）
 
 ---
 
@@ -213,6 +241,8 @@ unraid-sage/
     ├── test_daemon.sh           #   守护进程测试
     ├── test_atomic_write.sh     #   原子写入测试
     ├── test_lock.sh             #   文件锁测试
+    ├── test_clear_lock.sh       #   手动清除锁测试
+    ├── test_timeout.sh          #   超时保护测试
     ├── test_advice_timestamp.sh #   建议时间戳测试
     └── test_cleanup.sh          #   缓存清理测试
 ```
@@ -244,6 +274,8 @@ unraid-sage/
 - **临时文件**: 统一写到 `/tmp/ai-advisor/`，用完清理
 - **原子写入**: 运行时 JSON 文件（`last-stats.json`、`last-advice.json`）必须通过 `写 .tmp → mv` 的方式写入，禁止直接 overwrite
 - **锁文件**: 所有获取锁的操作必须做 PID 存活检测（`kill -0 $pid` 或检查 `/proc/$pid/`），禁止仅因文件存在就阻塞
+- **进程命名**: 所有 daemon 相关的进程名必须包含 `ai-sage` 前缀，通过 `exec -a ai-sage-xxx` 实现
+- **超时保护**: 所有可能长时间执行的命令必须使用 `timeout N` 包起来，collect-stats 30s、query-ai 120s、清理 10s
 - **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
 
 ### 5.2 PHP (.page)
@@ -286,7 +318,12 @@ unraid-sage/
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
 | `test_lock.sh` | 锁文件存在且 PID 存活时跳过执行 | 伪造锁文件 + 存活的 PID(cron)，验证跳过 |
 | 同测试 | 锁文件存在但 PID 已死时自动覆盖 | 伪造锁文件 + 已死的 PID，验证重新执行 |
+| 同测试 | PID 存活但进程名不含 ai-sage 时自动覆盖 | 伪造锁文件 + 非 ai-sage 进程，验证重新执行 |
 | 同测试 | 锁文件被手动清除后能正常执行 | 删除锁文件后验证 cron 可正常触发 |
+| `test_clear_lock.sh` | clear-lock.sh: PID+名都匹配 → kill + 删锁 | 启动 ai-sage 进程，验证清除成功 |
+| 同测试 | clear-lock.sh: PID 匹配但名不匹配 → 不执行 | 启动非 ai-sage 进程，验证不清除 |
+| 同测试 | clear-lock.sh: 无锁文件 → 正常退出 | 验证退出码 0 + 日志 |
+| `test_timeout.sh` | collect-stats.sh 超时被 timeout 截断 | 模拟超时场景，验证退出码 124 且锁仍释放 |
 | `test_advice_timestamp.sh` | last-advice.json 包含 collected_at 和 advice_at | `jq 'has("collected_at","advice_at")'` |
 | 同测试 | 历史缓存文件体内也包含时间戳 | 随机检查一个 history 文件 |
 | `test_cleanup.sh` | 历史缓存超过 N 条时正确淘汰 | 生成 N+1 条，验证只剩 N 条 |
@@ -309,10 +346,13 @@ unraid-sage/
 
 | 场景 | 预期行为 |
 |------|---------|
-| AI API 不可用 | `query-ai.sh` 超时退出，写 error 日志，不清除上次建议，释放锁 |
-| cron 重叠触发（上次还没跑完） | daemon 检测锁 + PID 存活，跳过本轮，写 warning 日志 |
-| daemon 崩溃后锁残留 | 下次 cron 触发检测 PID 已死，自动覆盖锁继续执行 |
-| 锁被用户手动清除 | 清除日志记录，下次 cron 正常触发 |
+| AI API 不可用 | `query-ai.sh` 超时退出（timeout 120s），写 error 日志，不清除上次建议，释放锁 |
+| cron 重叠触发（上次还没跑完） | daemon 检测锁 + PID 存活 + 进程名匹配，跳过本轮，写 warning 日志 |
+| daemon 崩溃后锁残留 | 下次 cron 触发检测 PID 已死或名不匹配，自动覆盖锁继续执行 |
+| 锁被用户手动清除（合法进程） | kill 进程 + 删锁，记日志，下次 cron 正常触发 |
+| 锁被用户手动清除（PID 名不匹配） | clear-lock.sh 拒绝执行，写 warning 日志，锁文件保留 |
+| collect-stats.sh 卡死 | timeout 30s 截断，继续后续步骤（跳过已失败） |
+| query-ai.sh 卡死 | timeout 120s 截断，释放锁，保留上次建议 |
 | Docker 未运行 | `collect-stats.sh` 跳过 Docker 部分，正常输出其他指标 |
 | 磁盘未挂载 | `collect-stats.sh` 跳过对应磁盘，不报错退出 |
 | API Key 为空且 endpoint 非本地 | 设置页提示警告 |
@@ -331,8 +371,12 @@ unraid-sage/
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入完成后 `/tmp/ai-advisor/` 下无 `.tmp` 残留文件
 - [ ] cron 重叠触发时自动跳过，不并发执行
-- [ ] daemon 崩溃后锁残留，下次 cron 自动恢复（检测 PID 已死 → 覆盖锁）
-- [ ] 设置页可查看锁状态（PID / 是否存活），支持手动清除锁
+- [ ] daemon 崩溃后锁残留，下次 cron 自动恢复（检测 PID 已死或名不匹配 → 覆盖锁）
+- [ ] 设置页可查看锁状态（PID / 进程名 / 是否存活），支持手动清除锁
+- [ ] 清除锁时双重验证（PID + 进程名含 ai-sage），不匹配时拒绝执行
+- [ ] 清除锁成功时同时终止进程和删除锁文件
+- [ ] 每个子步骤有超时保护（collect 30s / query 120s / cleanup 10s），超过即跳过
+- [ ] daemon 进程名包含 ai-sage 标识，可通过 `ps` 识别
 - [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片，每条建议带时间戳
 - [ ] 设置页面所有配置项保存后生效
 - [ ] 修改 cron 表达式后，下次调度按新表达式执行
