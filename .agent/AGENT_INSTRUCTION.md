@@ -75,8 +75,8 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 │  └─ data/ (历史建议缓存, 保留最近 N 条, 自动淘汰)  │
 ├──────────────────────────────────────────────────┤
 │  运行时 /tmp/ai-advisor/                          │
-│  ├─ last-stats.json (最近一次采集数据)             │
-│  └─ last-advice.json (最近一次 AI 建议)           │
+│  ├─ last-stats.json (最近一次采集数据, 原子写入)    │
+│  └─ last-advice.json (最近一次 AI 建议, 原子写入)  │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -100,10 +100,11 @@ driver_loaded → starting → array_started → disks_mounted
 ```
 [System] --每6小时(默认)--> collect-stats.sh --JSON--> query-ai.sh --POST--> AI API
                                       ↑                          ↓
-                                  advisor-daemon.sh       存档 advice-*.json
-                                      ↑                       + 清理淘汰旧记录
+                                  advisor-daemon.sh    写入 .tmp → mv 原子重命名
+                                      ↑                    last-advice.json
                                   cron 调度                      ↓
                                                          WebGUI PHP 读取展示
+                                                         (始终读到完整数据)
 ```
 
 ---
@@ -134,6 +135,8 @@ driver_loaded → starting → array_started → disks_mounted
 - 采集脚本不写入源文件系统，只输出到 `/tmp/`（RAM）
 - 历史建议缓存写入持久存储（`/boot/config/plugins/ai-advisor/data/`），每次新写入后清理淘汰旧记录，限制 N 条内
 - 清理仅在添加新记录时触发，不产生额外独立写入周期
+- **原子写入**: `last-stats.json` 和 `last-advice.json`（运行时文件，供 WebGUI 实时读取）必须使用临时文件 + mv 的方式写入 — 先写 `.tmp` 后缀文件，完成后 `mv` 覆盖目标文件，确保 WebGUI PHP 不会读到半截写的中间状态
+- 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
 
 ---
@@ -161,7 +164,10 @@ unraid-sage/
 │       └── advisor.css          #   WebGUI CSS
 └── tests/                       # 测试脚本
     ├── test_collect_stats.sh    #   采集脚本测试
-    └── test_query_ai.sh         #   AI 接口测试
+    ├── test_query_ai.sh         #   AI 接口测试
+    ├── test_daemon.sh           #   守护进程测试
+    ├── test_atomic_write.sh     #   原子写入测试
+    └── test_cleanup.sh          #   缓存清理测试
 ```
 
 ### 部署路径（安装后）
@@ -189,6 +195,7 @@ unraid-sage/
 - **函数命名**: 小写 + 下划线，如 `collect_cpu_stats()`
 - **引号**: 所有变量引用必须加双引号 `"$var"`
 - **临时文件**: 统一写到 `/tmp/ai-advisor/`，用完清理
+- **原子写入**: 运行时 JSON 文件（`last-stats.json`、`last-advice.json`）必须通过 `写 .tmp → mv` 的方式写入，禁止直接 overwrite
 - **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
 
 ### 5.2 PHP (.page)
@@ -224,6 +231,9 @@ unraid-sage/
 | `test_query_ai.sh` | query-ai.sh 输出合法 JSON | `jq . /tmp/ai-advisor/last-advice.json` |
 | 同测试 | 建议包含 severity/category/title/description/suggestion | 逐个字段验证 |
 | 同测试 | severity 值域正确 | `jq '.[].severity'` 验证 in (high,medium,low) |
+| `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
+| 同测试 | 写入完成后 .tmp 后缀文件已清除 | `ls /tmp/ai-advisor/*.tmp` 应为空 |
+| 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
 | `test_daemon.sh` | daemon start/stop/status 正常 | 验证 PID 文件 |
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
 | `test_cleanup.sh` | 历史缓存超过 N 条时正确淘汰 | 生成 N+1 条，验证只剩 N 条 |
@@ -261,6 +271,8 @@ unraid-sage/
 - [ ] 每次 cron 触发后，`/tmp/ai-advisor/last-stats.json` 正确更新
 - [ ] `last-stats.json` 包含 CPU/内存/磁盘/阵列/Docker/网络/系统 全部指标
 - [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议
+- [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
+- [ ] 写入完成后 `/tmp/ai-advisor/` 下无 `.tmp` 残留文件
 - [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片
 - [ ] 设置页面所有配置项保存后生效
 - [ ] 修改 cron 表达式后，下次调度按新表达式执行
