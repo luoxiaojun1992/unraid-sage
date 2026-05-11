@@ -83,7 +83,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 │  ├─ advisor-daemon.sh (锁管理: 获取/释放/检测)            │
 │  ├─ collect-stats.sh → JSON (CPU/内存/磁盘/Docker)       │
 │  ├─ query-ai.sh → POST AI API → 含时间戳的建议           │
-│  └─ clear-lock.sh (设置页调用, 双重验证 PID+进程名后 kill + 删锁)│
+│  └─ clear-lock.sh (设置页调用, 匹配才 kill, 不匹配也删锁)│
 ├──────────────────────────────────────────────────────────┤
 │  配置文件 /boot/config/plugins/ai-advisor/                │
 │  ├─ ai-advisor.cfg (API 配置/定时表达式/保留条数)         │
@@ -131,10 +131,11 @@ cron 触发
   └─ 释放锁 (删除 daemon.lock)
 
 手动清除 (clear-lock.sh):
-  1. 读 daemon.lock → PID
+  1. 读 daemon.lock → PID, 锁不存在则退出
   2. ps -p $PID -o comm= → 进程名
-  3. PID 存活 + 进程名含 ai-sage → kill + 删锁 + 记日志
-  4. 否则 → 只记 warning，不执行
+  3. PID 存活 + 名含 ai-sage → kill + 删锁 + 记日志
+  4. PID 存活 + 名不匹配   → 只删锁，不 kill
+  5. PID 已死              → 只删锁
 
 WebGUI PHP 读取 last-advice.json / data/ 目录展示
          + 读取 daemon.lock 状态展示锁状态
@@ -200,11 +201,11 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 
 **手动清除锁（clear-lock.sh）**:
 1. 读取 `daemon.lock` 中的 PID
-2. 执行 `ps -p $PID -o comm=` 获取进程名
-3. **双重验证**: 仅当 `PID 存活` **且** `进程名包含 ai-sage` 时继续
-4. 通过 → `kill $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
-5. 不通过 → `logger -t ai-advisor "clear-lock aborted: pid $PID name mismatch ($actual_name)"` → 不执行任何操作
-6. 锁文件本身不存在 → `logger -t ai-advisor "clear-lock: no lock file"` → 退出
+2. 锁文件不存在 → `logger -t ai-advisor "clear-lock: no lock file"` → 退出
+3. 锁存在 → 执行 `ps -p $PID -o comm=` 获取进程名
+4. **PID 存活 + 进程名包含 ai-sage** → `kill $PID` → 等待进程退出（最多 5 秒）→ 删除 `daemon.lock` → 记日志
+5. **PID 存活但进程名不含 ai-sage** → 只删除 `daemon.lock`，不 kill → `logger -t ai-advisor "clear-lock: removed stale lock, pid $PID belongs to $actual_name, not killed"`
+6. **PID 已死** → 直接删除 `daemon.lock` → 记日志
 
 **异常处理**:
 - 如果 daemon 在持有锁时崩溃（kill -9、系统重启等），锁文件残留含已死 PID
@@ -321,7 +322,8 @@ unraid-sage/
 | 同测试 | PID 存活但进程名不含 ai-sage 时自动覆盖 | 伪造锁文件 + 非 ai-sage 进程，验证重新执行 |
 | 同测试 | 锁文件被手动清除后能正常执行 | 删除锁文件后验证 cron 可正常触发 |
 | `test_clear_lock.sh` | clear-lock.sh: PID+名都匹配 → kill + 删锁 | 启动 ai-sage 进程，验证清除成功 |
-| 同测试 | clear-lock.sh: PID 匹配但名不匹配 → 不执行 | 启动非 ai-sage 进程，验证不清除 |
+| 同测试 | clear-lock.sh: PID 存活但名不匹配 → 只删锁不 kill | 启动非 ai-sage 进程，验证删锁但进程存活 |
+| 同测试 | clear-lock.sh: PID 已死 → 只删锁 | 伪造含已死 PID 的锁文件，验证删锁成功 |
 | 同测试 | clear-lock.sh: 无锁文件 → 正常退出 | 验证退出码 0 + 日志 |
 | `test_timeout.sh` | collect-stats.sh 超时被 timeout 截断 | 模拟超时场景，验证退出码 124 且锁仍释放 |
 | `test_advice_timestamp.sh` | last-advice.json 包含 collected_at 和 advice_at | `jq 'has("collected_at","advice_at")'` |
@@ -350,7 +352,7 @@ unraid-sage/
 | cron 重叠触发（上次还没跑完） | daemon 检测锁 + PID 存活 + 进程名匹配，跳过本轮，写 warning 日志 |
 | daemon 崩溃后锁残留 | 下次 cron 触发检测 PID 已死或名不匹配，自动覆盖锁继续执行 |
 | 锁被用户手动清除（合法进程） | kill 进程 + 删锁，记日志，下次 cron 正常触发 |
-| 锁被用户手动清除（PID 名不匹配） | clear-lock.sh 拒绝执行，写 warning 日志，锁文件保留 |
+| 锁被用户手动清除（PID 名不匹配） | clear-lock.sh 只删锁不 kill，记 warning 日志 |
 | collect-stats.sh 卡死 | timeout 30s 截断，继续后续步骤（跳过已失败） |
 | query-ai.sh 卡死 | timeout 120s 截断，释放锁，保留上次建议 |
 | Docker 未运行 | `collect-stats.sh` 跳过 Docker 部分，正常输出其他指标 |
@@ -373,8 +375,7 @@ unraid-sage/
 - [ ] cron 重叠触发时自动跳过，不并发执行
 - [ ] daemon 崩溃后锁残留，下次 cron 自动恢复（检测 PID 已死或名不匹配 → 覆盖锁）
 - [ ] 设置页可查看锁状态（PID / 进程名 / 是否存活），支持手动清除锁
-- [ ] 清除锁时双重验证（PID + 进程名含 ai-sage），不匹配时拒绝执行
-- [ ] 清除锁成功时同时终止进程和删除锁文件
+- [ ] 清除锁时 PID+名匹配 → kill 进程 + 删锁；名不匹配/PID 已死 → 仅删锁不清进程
 - [ ] 每个子步骤有超时保护（collect 30s / query 120s / cleanup 10s），超过即跳过
 - [ ] daemon 进程名包含 ai-sage 标识，可通过 `ps` 识别
 - [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片，每条建议带时间戳
