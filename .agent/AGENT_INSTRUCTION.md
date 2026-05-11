@@ -40,12 +40,13 @@
 ### 1.3 WebGUI 展示
 
 - **主页面** (`ai-advisor.page`):
-  - AI 建议卡片列表（按严重程度排序），每条卡片显示：
+  - **默认文件模式**: AI 建议以可下载的 JSON 文件形式提供，用户下载后用本地查看器打开（零渲染风险）
+  - **可选 HTML 模式**: 用户可在设置页开启此模式，AI 建议渲染为 HTML 卡片列表（按严重程度排序），每条卡片显示：
     - 标题、描述、建议内容
     - 生成时间戳（`advice_at`）
     - 对应的采集时间戳（`collected_at`）
-  - 最近一次采集时间
-  - 当前锁状态（运行中/空闲/异常锁定），如果异常锁定显示"清除锁"按钮
+  - 两种模式均展示最近一次采集时间和锁状态
+  - HTML 模式下底部显示警告条："AI 建议已安全转义，纯文本渲染"
 - **设置页面** (`ai-advisor.settings.page`):
   - 配置 API endpoint / api_key / model
   - 计划任务：采用 Dynamix Scheduler 风格的下拉菜单（Disabled / Hourly / Daily / Weekly / Monthly / Custom）
@@ -71,6 +72,7 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 - Model 名称（本地 Ollama 默认 `qwen2.5:7b`）
 - Cron 定时表达式（默认 `0 */6 * * *` 每 6 小时）
 - 历史建议保留条数（默认 `30`，设 `0` 表示不保留历史）
+- 输出模式: `file`（默认，下载 JSON 文件）/ `html`（在 WebGUI 中渲染卡片。开启时 XSS 防护仍然有效，但用户需知悉网页渲染的残余风险）
 - 启用/禁用
 
 ---
@@ -81,7 +83,8 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 ┌──────────────────────────────────────────────────────────┐
 │  WebGUI (PHP .page)                                       │
 │  ├─ 主页面: 展示上次采集时间 + AI 建议列表（含时间戳）    │
-│  └─ 设置页: API/key/model/cron/保留条数                  │
+│  └─ 设置页: API/key/model/cron/保留条数/输出模式        │
+│       ├─ 输出模式: file(默认下载) / html(可选渲染)      │
 │       ├─ 锁状态指示: 锁定中(PID) / 空闲                  │
 │       └─ [清除锁] 按钮 → exec(clear-lock.sh)             │
 ├──────────────────────────────────────────────────────────┤
@@ -181,6 +184,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
   1. **AI Prompt 层**: system prompt 明确禁止输出 HTML/JS，规定纯文本返回
   2. **服务端剥离层**: `query-ai.sh` 写入 JSON 前用 `sed 's/<[^>]*>//g'` 剥离所有 HTML 标签；PHP 输出时再做 `htmlspecialchars()` 双保险
   3. **前端渲染层**: JS 用 `textContent`（而非 `innerHTML`）渲染建议内容
+- **输出模式安全策略**: 默认输出模式为 `file`（下载 JSON），用户主动切换到 `html` 模式时才在 WebGUI 渲染卡片。即使 HTML 模式也强制使用 `textContent` + `htmlspecialchars()` + `sed` 剥离的三道防线，不因模式切换而跳过任何安全步骤
 - **配置文件同样原子写入**: `ai-advisor.cfg` 也使用 `.tmp + mv` 模式写入，避免 PHP 写入中断导致 `parse_ini_file()` 解析失败
 - 历史缓存文件 `advice-*.json` 则直接写入，因为 WebGUI 不实时读取单个文件，而是通过 `ls -t | head -N` 读取列表
 - 插件卸载时清理 `/tmp/ai-advisor/`、`/boot/config/plugins/ai-advisor/` 和 `/usr/local/emhttp/plugins/ai-advisor/`
@@ -332,6 +336,7 @@ unraid-sage/
 | `test_xss_prevention.sh` | AI 建议中的 HTML 标签被正确剥离 | 注入 `<script>alert(1)</script>`，验证输出为空文本 |
 | 同测试 | 正常文本中的 `<` 和 `>` 被正确保留 | 验证 `5 < 10` 不被误删 |
 | 同测试 | PHP `htmlspecialchars()` 双编码测试 | 验证 `&` 不被二次转义 |
+| 同测试 | HTML 模式下 XSS 防线不退化 | file/html 模式切换后测试同上 |
 | `test_desensitization.sh` | 发送给 AI 的 JSON 不含容器名称 | `jq '..|.name? // empty'` 应只有镜像名 |
 | 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
 | `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
@@ -393,7 +398,8 @@ unraid-sage/
 - [ ] AI 分析后，`/tmp/ai-advisor/last-advice.json` 包含合法建议，含 `collected_at` 和 `advice_at` 时间戳
 - [ ] AI 建议中的 `title`/`description`/`suggestion` 经过 HTML 标签剥离 + 转义，不会因 AI 返回内容触发 XSS
 - [ ] AI Prompt 中明确要求纯文本 JSON 输出、禁止 HTML/JS
-- [ ] 前端渲染 AI 建议时使用 `textContent`，不使用 `innerHTML`
+- [ ] 默认输出模式为 `file`（下载 JSON），切换到 `html` 后 WebGUI 渲染卡片
+- [ ] HTML 模式下 XSS 防线与 file 模式一致，不因模式切换退化
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
