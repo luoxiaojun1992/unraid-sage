@@ -40,8 +40,10 @@
 ### 1.3 WebGUI 展示
 
 - **主页面** (`ai-advisor.page`):
-  - **默认文件模式**: AI 建议以可下载的 JSON 文件形式提供，用户下载后用本地查看器打开（零渲染风险）。下载通过专用端点 `download-advice.php` 实现，后端构造 JSON 响应，通过 `Content-Disposition` header 指定文件名（如 `ai-sage-advice-2026-05-11-1748.json`），**不提供通用文件下载接口**
-  - **可选 HTML 模式**: 用户可在设置页开启此模式，AI 建议渲染为 HTML 卡片列表（按严重程度排序），每条卡片显示：
+  - **默认文件模式**: 采集的 metrics（`last-stats.json`）和 AI 建议（`last-advice.json`）一起打包为 ZIP 文件下载。下载通过专用端点 `download-bundle.php` 实现，后端构造 ZIP 包（内含两个 JSON 文件），通过 `Content-Disposition` header 指定文件名（如 `ai-sage-report-2026-05-11-1748.zip`），**不提供通用文件下载接口**
+  - **可选 HTML 模式**: 用户可在设置页开启此模式，主页面分两栏展示：
+    - 左栏/上栏：系统状态总览（CPU/内存/磁盘/阵列概要卡片）
+    - 右栏/下栏：AI 建议卡片列表（按严重程度排序），每条卡片显示：
   - **可选 HTML 模式**: 用户可在设置页开启此模式，AI 建议渲染为 HTML 卡片列表（按严重程度排序），每条卡片显示：
     - 标题、描述、建议内容
     - 生成时间戳（`advice_at`）
@@ -56,6 +58,7 @@
   - 清除逻辑：读取锁中 PID → `ps -p $PID -o comm=` 确认进程名含 `ai-sage` → 只有 PID **和** 进程名都匹配时才 `kill` + 删除锁文件 → 否则只写 warning 日志不执行清除
   - 锁被清除时记录日志 `logger -t ai-advisor "lock manually cleared: killed pid $PID (ai-sage)"`
   - **[立即运行] 按钮**: 调用 `advisor-daemon.sh run-once` 模拟一次 cron 触发。执行前检查 daemon.lock（与 cron 锁策略完全一致）：锁存在 + PID 存活 + 进程名含 ai-sage → 跳过并提示"已有一个任务在运行"；否则正常执行一轮采集和分析
+  - **[Dry Run] 按钮**: 调用 `advisor-daemon.sh dry-run`。**只采集 metrics 不调用 AI API**，锁检查策略与 run-once 相同。用于验证采集配置和网络连通性，不消耗 AI API 额度
 
 ### 1.4 历史建议缓存与清理
 
@@ -84,13 +87,14 @@ AI 建议按次存档到 `/boot/config/plugins/ai-advisor/data/`（Unraid 持久
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  WebGUI (PHP .page)                                       │
-│  ├─ 主页面: 展示上次采集时间 + AI 建议列表（含时间戳）    │
-│  ├─ download-advice.php (专用下载端点, 固定 filename header)│
+│  ├─ 主页面: 上次采集 + AI 建议 / metrics 面板          │
+│  ├─ download-bundle.php (专用 ZIP 下载, 含 metrics + advice)│
 │  └─ 设置页: API/key/model/cron/保留条数/输出模式        │
 │       ├─ 输出模式: file(默认下载) / html(可选渲染)      │
 │       ├─ 锁状态指示: 锁定中(PID) / 空闲                  │
 │       └─ [清除锁] 按钮 → exec(clear-lock.sh)             │
 │       └─ [立即运行] 按钮 → exec advisor-daemon.sh run-once│
+│       └─ [Dry Run] 按钮 → exec advisor-daemon.sh dry-run  │
 ├──────────────────────────────────────────────────────────┤
 │  后端脚本 (Shell + jq)                                    │
 │  ├─ advisor-daemon.sh (锁管理: 获取/释放/检测, run-once 模式)│
@@ -122,12 +126,12 @@ driver_loaded → starting → array_started → disks_mounted
 
 ### 事件钩子
 
-- `event/started`: 阵列启动完成 → 启动 advisor-daemon.sh
+- `event/started`: 阵列启动完成 → 执行启动冲突检测（目录名 + 进程名）→ 无冲突则启动 advisor-daemon.sh
 
 ### 数据流
 
 ```
-cron 触发
+cron 触发 / run-once / dry-run
   │
   ├─ advisor-daemon.sh 检查 daemon.lock
   │   ├─ 锁存在 + PID 存活 + 进程名含 ai-sage → 跳过本轮（防重叠）
@@ -135,7 +139,10 @@ cron 触发
   │
   ├─ timeout 30 collect-stats.sh --JSON--> last-stats.json (原子写入)
   │
-  ├─ timeout 120 query-ai.sh --POST--> AI API → last-advice.json (含时间戳, 原子写入)
+  ├─ [dry-run] → 跳过 AI 调用，直接释放锁
+  │
+  ├─ [run-once / cron] timeout 120 query-ai.sh --POST--> AI API
+  │                                         → last-advice.json (含时间戳, 原子写入)
   │                                         + data/advice-*.json (历史存档, 含时间戳)
   │                                         + timeout 10 清理淘汰旧记录
   │
@@ -195,19 +202,23 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 
 ### 3.4 下载接口安全设计
 
-**专用端点** `download-advice.php`:
-- 仅读取 `last-advice.json`，构造 JSON 响应
-- 设置 `Content-Type: application/json` 和 `Content-Disposition: attachment; filename="ai-sage-advice-{timestamp}.json"`
-- 文件名中的时间戳从 `last-advice.json` 的 `collected_at` 字段提取，不依赖用户输入
-- 输出 JSON 内容后 `exit`，不执行任何额外操作
+**专用端点** `download-bundle.php`:
+- 读取 `last-stats.json` 和 `last-advice.json`，打包为 ZIP
+- ZIP 包内含两个文件：
+  - `metrics.json` — 采集的系统状态数据
+  - `advice.json` — AI 优化建议（如存在）
+- 设置 `Content-Type: application/zip` 和 `Content-Disposition: attachment; filename="ai-sage-report-{timestamp}.zip"`
+- 文件名中的时间戳从 `last-stats.json` 的 `collected_at` 字段提取，不依赖用户输入
+- 打包使用 PHP 内置的 `ZipArchive` 类，确保关闭句柄后 exit
+- 两个文件都不存在时返回 404，不生成空 ZIP
 
 **安全约束**（不提供通用下载接口）:
 - 禁止 `download.php?file=xxx` 或 `download.php?path=xxx` 模式
-- 禁止读取 `last-advice.json` 之外的任何文件
+- 禁止读取 `last-*.json` 之外的任何文件
 - 禁止接受用户传入的文件路径或名称参数
 - PHP 层面的过滤：即使收到 `file` 或 `path` 参数也忽略
 
-### 3.4 文件锁机制（防重复执行）
+### 3.5 文件锁机制（防重复执行）
 
 **目的**: 避免 cron 周期短于 AI API 响应时间时，前后两次执行重叠。
 
@@ -247,6 +258,20 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 - 下次 cron 触发时，检测到 PID 不存活或名不匹配，自动覆盖锁继续执行（自愈）
 - 极端情况用户通过设置页手动清除（含双重验证）
 
+### 3.6 启动冲突检测
+
+`event/started` 启动 daemon 前执行以下检查：
+
+**目录名冲突**:
+- 检查 `/boot/config/plugins/` 下是否存在其他以 `ai-advisor` 命名的目录（如 `ai-advisor-xxx` 或 `ai-advisor_backup`）
+- 检查 `/usr/local/emhttp/plugins/` 下本插件目录是否被其他插件占用
+- 发现冲突时写 error 日志 `logger -t ai-advisor "startup conflict: directory collision detected ($conflict_path)"`，阻止 daemon 启动
+
+**进程名冲突**:
+- 执行 `ps aux | grep ai-sage | grep -v grep` 检查是否有同名进程已在运行
+- 如果存在且进程来自不同的 PID 命名空间（非本插件之前残留的锁），写 warning 日志并等待 5 秒后重试
+- 重试 3 次后仍冲突，退出静默（由 cron 触发时自动恢复）
+
 ---
 
 ## 4. 目录结构
@@ -265,9 +290,9 @@ unraid-sage/
 │   ├── event/
 │   │   └── started              #   阵列启动钩子
 │   ├── pages/
-│   │   ├── ai-advisor.page          #   WebGUI 主页面
-│   │   ├── download-advice.php      #   专用下载端点（无通用下载接口）
-│   │   └── ai-advisor.settings.page #   设置页面
+│   │   ├── ai-advisor.page          #   WebGUI 主页面（metrics 面板 + AI 建议）
+│   │   ├── download-bundle.php      #   专用 ZIP 下载端点（metrics + advice）
+│   │   └── ai-advisor.settings.page #   设置页面（含 Dry Run 按钮）
 │   ├── javascript/
 │   │   └── advisor.js           #   WebGUI JS
 │   └── styles/
@@ -362,10 +387,12 @@ unraid-sage/
 | 同测试 | 发送给 AI 的 JSON 不含 IP 地址 | `jq '..|strings' | grep -vE '^\d+\.\d+'` |
 | `test_config_validation.sh` | OUTPUT_MODE 设为非法值（如 `xxx`）自动回退 `file` | 验证配置写入后读取仍为 `file` |
 | 同测试 | OUTPUT_MODE 设为合法值 `html` 正常写入 | 验证配置读取为 `html` |
-| `test_download.sh` | download-advice.php 返回合法 JSON | 验证 HTTP 200 + Content-Type application/json |
+| `test_download.sh` | download-bundle.php 返回合法 ZIP | 验证 HTTP 200 + Content-Type application/zip |
+| 同测试 | ZIP 内含 metrics.json 和 advice.json | `unzip -l` 验证文件列表 |
 | 同测试 | 响应头含 Content-Disposition attachment | 验证 `grep -i attachment` |
-| 同测试 | 文件名包含时间戳而非固定值 | 验证 filename 匹配 `ai-sage-advice-` 前缀 |
-| 同测试 | 传入 file=xxx 参数时被忽略 | 验证仍返回 last-advice.json |
+| 同测试 | 文件名包含时间戳 | 验证 filename 匹配 `ai-sage-report-` 前缀 |
+| 同测试 | 两个数据文件都不存在时返回 404 | 清空运行时文件后验证 404 |
+| 同测试 | 传入 file=xxx 参数时被忽略 | 验证仍返回正确 ZIP |
 | `test_atomic_write.sh` | 写入期间读取不会拿到半截数据 | 后台写大 JSON + 前台持续 `jq .` 不报错 |
 | 同测试 | 写入完成后 .tmp 后缀文件已清除 | `ls /tmp/ai-advisor/*.tmp` 应为空 |
 | 同测试 | mv 覆盖后目标文件 mtime 更新 | 验证时间戳正确 |
@@ -373,6 +400,11 @@ unraid-sage/
 | 同测试 | daemon 不重复启动 | 二次 start 应返回已有 PID |
 | 同测试 | daemon run-once 执行完整一轮 | 验证 last-stats.json 和 last-advice.json 更新 |
 | 同测试 | run-once 被锁拦截 | 伪造锁 + 存活 PID，验证 run-once 跳过 |
+| `test_dry_run.sh` | dry-run 只采集 metrics 不调 AI | 验证 last-stats.json 更新但 last-advice.json 不变 |
+| 同测试 | dry-run 锁检查与 cron 一致 | 验证锁定状态时跳过 |
+| `test_startup_conflict.sh` | 启动时检测目录名冲突 | 伪造冲突目录，验证 daemon 不启动 + 写 error 日志 |
+| 同测试 | 启动时检测进程名冲突 | 启动同名进程，验证 daemon 等待重试后退出 |
+| 同测试 | 无冲突时正常启动 | 验证 daemon 正常运行 |
 | `test_lock.sh` | 锁文件存在且 PID 存活时跳过执行 | 伪造锁文件 + 存活的 PID(cron)，验证跳过 |
 | 同测试 | 锁文件存在但 PID 已死时自动覆盖 | 伪造锁文件 + 已死的 PID，验证重新执行 |
 | 同测试 | PID 存活但进程名不含 ai-sage 时自动覆盖 | 伪造锁文件 + 非 ai-sage 进程，验证重新执行 |
@@ -396,6 +428,8 @@ unraid-sage/
 | 阵列启动 | daemon 自动启动，PID 文件存在 |
 | 定时采集 | 到 cron 时间点，`last-stats.json` 更新 |
 | 手动触发 | 点击"立即运行"，锁空闲时正常运行并被锁拦截时提示 |
+| Dry Run | 点击"Dry Run"，只采集 metrics 不调 AI，锁空闲/锁定两种状态 |
+| 启动冲突 | 存在冲突目录/进程时 daemon 不启动，无冲突时正常 |
 | AI 分析 | 有建议输出，WebGUI 正常展示 |
 | 配置修改 | 修改 API endpoint，下次采集生效 |
 | 插件卸载 | 所有文件清理干净 |
@@ -417,6 +451,8 @@ unraid-sage/
 | API Key 为空且 endpoint 非本地 | 设置页提示警告 |
 | cron 表达式格式非法 | daemon 使用默认值，写 warning 日志 |
 | `jq` 不可用 | 脚本检测依赖，输出友好错误 |
+| 启动时目录名冲突 | error 日志，daemon 不启动 |
+| 启动时进程名冲突 | warning 日志，等待重试 3 次后静默退出 |
 
 ---
 
@@ -434,6 +470,10 @@ unraid-sage/
 - [ ] 下载接口为专用端点 `download-advice.php`，无通用文件下载接口
 - [ ] 下载时 Content-Disposition 指定文件名，不可通过参数篡改路径
 - [ ] 设置页"立即运行"按钮使用与 cron 相同的锁策略，锁定状态跳过并提示
+- [ ] 设置页"Dry Run"按钮只采集 metrics 不调 AI，锁策略与 cron 一致
+- [ ] HTML 模式下主页面分 metrics 面板和 AI 建议两栏展示
+- [ ] 下载接口打包为 ZIP 文件（内含 metrics.json + advice.json），文件名为 `ai-sage-report-{timestamp}.zip`
+- [ ] 启动时检测目录名冲突和进程名冲突，存在冲突时阻止 daemon 启动
 - [ ] 发送给 AI 的数据不含容器名称、系统路径、IP 地址
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
 - [ ] 写入 `last-*.json` 时使用临时文件 + mv 原子写入，WebGUI 不会读到半截 JSON
