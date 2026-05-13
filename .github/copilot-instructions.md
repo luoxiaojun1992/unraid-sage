@@ -4,7 +4,7 @@ This project uses a centralized agent instruction document.
 
 ## Entry Point
 
-Refer to `.agent/AGENT_INSTRUCTION.md` for complete project context.
+Refer to `.agent/AI_AGENT_COMMON_INSTRUCTIONS.md` for complete project context.
 
 The document includes:
 - Functional requirements and system metrics to collect

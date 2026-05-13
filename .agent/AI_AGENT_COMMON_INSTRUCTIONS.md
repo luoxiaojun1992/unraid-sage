@@ -278,7 +278,7 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 
 ```
 unraid-sage/
-├── AGENT_INSTRUCTION.md         # 本文件
+├── AI_AGENT_COMMON_INSTRUCTIONS.md  # 本文件
 ├── ai-advisor.plg               # ↑ 安装器（构建时生成到根目录）
 ├── source/                      # ↓ 源文件目录
 │   ├── default.cfg              #   默认配置

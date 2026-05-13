@@ -4,7 +4,7 @@ This project follows a centralized agent instruction document located in the `.a
 
 ## Entry Point
 
-Read `.agent/AGENT_INSTRUCTION.md` for complete project context before making any changes.
+Read `.agent/AI_AGENT_COMMON_INSTRUCTIONS.md` for complete project context before making any changes.
 
 This file covers:
 - Functional requirements

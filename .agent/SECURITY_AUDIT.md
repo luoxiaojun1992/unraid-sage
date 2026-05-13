@@ -1,7 +1,7 @@
 # Unraid Sage — 安全审计报告
 
 审计日期: 2026-05-11
-审计范围: `.agent/AGENT_INSTRUCTION.md` 全部设计规范
+审计范围: `.agent/AI_AGENT_COMMON_INSTRUCTIONS.md` 全部设计规范
 审计角色: SecurityEngineer
 
 ---
