@@ -9,8 +9,9 @@
 | # | 措施 | 来源 | 状态 |
 |---|------|------|------|
 | A1 | WebGUI 登录认证保护 — 未登录用户无法访问任何 .page 文件和表单接口 | §3.3 | ✅ 设计决定 |
-| A2 | PHP exec() 固定脚本路径，不拼接用户输入 — 配置值通过 update-config.sh 内部读取 | §5.2 | ✅ 已实现 |
-| A3 | Shell 脚本内部对读取的配置值做合法性校验，防止 eval/exec 注入 | §5.2 | ✅ 已实现 |
+| A2 | CSRF Token 保护 — 设置页每个表单必须包含 `<input type="hidden" name="csrf_token" value="<?= $var['csrf_token'] ?>">`，Unraid emhttp 服务端自动校验，缺失或不匹配时拒绝请求 | §5.2 | ✅ Unraid 内置 |
+| A3 | PHP exec() 固定脚本路径，不拼接用户输入 — 配置值通过 update-config.sh 内部读取 | §5.2 | ✅ 已实现 |
+| A4 | Shell 脚本内部对读取的配置值做合法性校验，防止 eval/exec 注入 | §5.2 | ✅ 已实现 |
 
 **已接受风险**:
 - API Key 明文存储到 `/boot/config/plugins/ai-advisor/ai-advisor.cfg`（Unraid 生态共同问题，推荐用户使用本地 Ollama 避免 Key 泄露）

@@ -352,6 +352,7 @@ unraid-sage/
 - **配置写入**: 先写 `.tmp` 再 `mv` 覆盖原文件，与 Shell 端原子写规则一致
 - **配置校验**: 所有枚举值配置（如 OUTPUT_MODE）在写入前做严格校验，仅接受白名单内的值，非法值回退到安全默认值
 - **表单处理**: 提交后 `exec()` 调用固定路径的 update-config.sh 脚本，不拼接用户输入
+- **CSRF 防护**: 所有表单必须包含 `<input type="hidden" name="csrf_token" value="<?= $var['csrf_token'] ?>">`，Unraid emhttp 服务端自动校验
 
 ### 5.3 JavaScript
 
@@ -485,7 +486,7 @@ unraid-sage/
 - [ ] 每个子步骤有超时保护（collect 30s / query 120s / cleanup 10s），超过即跳过
 - [ ] daemon 进程名包含 ai-sage 标识，可通过 `ps` 识别
 - [ ] WebGUI 主页面正确显示采集时间和 AI 建议卡片，每条建议带时间戳
-- [ ] 设置页面所有配置项保存后生效
+- [ ] 设置页面所有配置项保存后生效，CSRF Token 缺失时请求被拒绝
 - [ ] 修改 cron 表达式后，下次调度按新表达式执行
 - [ ] AI API 不可用时，不清除已有的建议数据
 - [ ] 历史建议缓存达到上限后自动淘汰最旧记录，保留条数与配置一致
