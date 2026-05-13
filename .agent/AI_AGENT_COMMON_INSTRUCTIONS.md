@@ -299,7 +299,8 @@ unraid-sage/
 │       └── advisor.css          #   WebGUI CSS
 └── tests/                       # 测试脚本
     ├── docker-compose.yml        # Docker 沙盒测试编排
-    ├── mock/                     # Unraid 命令 Mock
+    ├── mock/                     # Unraid 命令 + AI API Mock
+    │   ├── api-server.php        # Mock AI API (PHP 内置服务器)
     │   ├── docker                # PATH 劫持脚本
     │   ├── docker-ps.json        # docker ps 模拟输出
     │   ├── docker-stats.json     # docker stats 模拟输出
@@ -471,45 +472,58 @@ unraid-sage/
 | 测试类型 | 能否在 Docker 中运行 | 说明 |
 |---------|-------------------|------|
 | XSS 剥离、脱敏、原子写入、锁机制、超时、清理 | ✅ 完全可测 | 纯 Shell/PHP 逻辑，不依赖 Unraid |
-| config 校验、download-bundle | ✅ 完全可测 | 需要 PHP 环境（内置 web server 即可） |
+| config 校验、download-bundle | ✅ 完全可测 | 需要 PHP 环境 |
 | collect-stats（CPU/内存/网络/系统） | ✅ 可测 | Linux 容器有 /proc、/sys，数据真实 |
-| collect-stats（Docker 部分） | ⚠️ 需要 mock | 容器内 Docker 命令不可用，需要 mock 脚本 |
-| collect-stats（阵列/磁盘） | ⚠️ 需要 mock | Unraid 特有的 var.ini、smartctl 需要模拟 |
+| collect-stats（Docker 部分） | ✅ 可测 | PATH 劫持 mock docker 命令 |
+| collect-stats（阵列/磁盘） | ✅ 可测 | mock var.ini + mock smartctl |
+| query-ai （AI API 调用） | ✅ 可测 | mock-api 容器模拟 OpenAI 端点 |
 | daemon 启动、锁冲突、进程冲突 | ✅ 完全可测 | 进程管理和文件操作在任何 Linux 上都一致 |
 | .plg 安装、WebGUI 集成 | ❌ 无法测 | 需要实际的 Unraid emhttp 环境 |
 
-#### 推荐方案：Docker 沙盒 + Mock
+#### 推荐方案：Docker 沙盒 + Mock API + PATH 劫持
 
-默认情况下测试在 Docker 容器中运行。测试依赖（bash、curl、jq、php-cli 等）提前写入 `Dockerfile.test` 并构建成镜像，启动时直接 `docker compose up`，无需运行时安装。
+测试依赖（bash、curl、jq、php-cli 等）提前写入 `Dockerfile.test` 并构建成镜像。`docker compose` 启动两个服务：
 
-```dockerfile
-# Dockerfile.test（项目根目录）
-FROM alpine:3.19
-RUN apk add --no-cache bash curl jq php-cli php-zip coreutils procps
-COPY source/scripts/ /scripts/
-COPY tests/ /tests/
-COPY tests/mock/ /mock/
-ENV PATH="/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
+mock-api 容器                    test-runner 容器
+┌─────────────────────┐          ┌─────────────────────┐
+│  php -S :11434       │          │  bash test_*.sh     │
+│  /mock/api-server.php│◀────────│  curl POST           │
+│                      │  mock    │  /v1/chat/completions│
+│  /health             │  API    │                      │
+│                      │          │  SAGE_API_ENDPOINT= │
+│  返回预设的 AI 建议  │          │  http://mock-api:   │
+│  (3 条, 含 perf/     │          │  11434/v1/chat/     │
+│   storage/security)  │          │  completions         │
+└─────────────────────┘          └─────────────────────┘
 ```
 
 ```yaml
 # tests/docker-compose.yml
 services:
+  mock-api:
+    build: ../Dockerfile.test
+    command: php -S 0.0.0.0:11434 -t /mock /mock/api-server.php
+
   test-runner:
-    build:
-      context: ..
-      dockerfile: Dockerfile.test
+    build: ../Dockerfile.test
+    depends_on: [mock-api]
     environment:
-      - PATH=/mock:/scripts:...
+      - SAGE_API_ENDPOINT=http://mock-api:11434/v1/chat/completions
       - SAGE_TEST_ENV=1
 ```
 
 **使用方式**:
 ```bash
 cd tests && docker compose up --build
-# 首次构建镜像，之后直接 up 即可
-# 源码变更后需要 --build 重新构建镜像
+# mock-api 先启动，test-runner 等待健康检查通过后执行测试
 ```
+
+**Mock API 行为**:
+- 接收 POST `/v1/chat/completions`，返回预设的 3 条建议（high/performance、medium/storage、low/security）
+- 暴露 GET `/health` 端点用于健康检查
+- 监听 11434 端口，与默认的 Ollama 端口一致
+- `query-ai.sh` 通过 `SAGE_API_ENDPOINT` 环境变量切换端点，无需改代码
 
 **Mock 原理**（以 `docker` 为例）：
 

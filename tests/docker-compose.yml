@@ -1,19 +1,52 @@
 version: "3.8"
 
 services:
+  # Mock AI API — 模拟 OpenAI 兼容的 chat completions 端点
+  mock-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile.test
+      # mock-api 只需要 PHP，用 test 镜像跑 PHP 内置服务器
+    image: unraid-sage-test
+    command:
+      - php
+      - -S
+      - 0.0.0.0:11434
+      - -t
+      - /mock
+      - /mock/api-server.php
+    ports:
+      - "11434"
+    networks:
+      - test-net
+
+  # 测试执行器
   test-runner:
     build:
       context: ..
       dockerfile: Dockerfile.test
     environment:
-      # PATH 劫持：mock/ 在最前面，docker/smartctl 优先走 mock
+      # PATH 劫持
       - PATH=/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      # /var/local/emhttp/var.ini 在容器中不存在，通过环境变量指定 mock 路径
-      - VAR_INI_MOCK=/mock/var.ini
-      # 标记测试环境，脚本可据此做环境判断
+      # mock API endpoint（指向 mock-api 容器）
+      - SAGE_API_ENDPOINT=http://mock-api:11434/v1/chat/completions
+      # 标记测试环境
       - SAGE_TEST_ENV=1
+    depends_on:
+      - mock-api
+    networks:
+      - test-net
     command: >
       sh -c "
+        echo '=== Waiting for mock API ===' &&
+        for i in \$$(seq 1 10); do
+          if curl -sf http://mock-api:11434/health > /dev/null 2>&1; then
+            echo 'mock API ready';
+            break;
+          fi;
+          echo 'waiting...' && sleep 1;
+        done &&
+        echo '' &&
         echo '=== Running all tests ===' &&
         failures=0 &&
         for t in /tests/test_*.sh; do
@@ -25,9 +58,13 @@ services:
             failures=\$$((failures + 1));
           fi;
           echo '';
-        done;
+        done &&
         echo '=== Done ===' &&
         total=\$$(ls /tests/test_*.sh 2>/dev/null | wc -l) &&
         echo \"Result: \$$((total - failures))/\$$total passed, \$$failures failed\" &&
         exit \$$failures;
       "
+
+networks:
+  test-net:
+    driver: bridge
