@@ -1,0 +1,38 @@
+# Unraid Sage — Test Image
+# Build: docker build -t unraid-sage-test -f Dockerfile.test .
+# Run:   docker compose -f tests/docker-compose.yml up
+
+FROM alpine:3.19
+
+# Install test dependencies (baked into image, not installed at runtime)
+RUN apk add --no-cache \
+    bash \
+    curl \
+    jq \
+    php-cli \
+    php-zip \
+    coreutils \
+    procps \
+    util-linux \
+    findutils
+
+# Create directories
+RUN mkdir -p /scripts /tests /mock /reports
+
+# Copy source scripts (read-only)
+COPY source/scripts/ /scripts/
+
+# Copy test scripts
+COPY tests/ /tests/
+
+# Copy mock scripts and data
+COPY tests/mock/ /mock/
+
+# Make mock scripts executable
+RUN chmod +x /mock/docker /mock/smartctl
+
+# Set PATH: mock/ first for hijack, then scripts, then system
+ENV PATH="/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Default working directory
+WORKDIR /scripts

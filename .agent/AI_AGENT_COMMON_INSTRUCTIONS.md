@@ -480,20 +480,35 @@ unraid-sage/
 
 #### 推荐方案：Docker 沙盒 + Mock
 
-默认情况下测试在 Docker 容器中运行（Alpine Linux），容器提供 bash、curl、jq、php-cli 等依赖。对于 Unraid 特有的命令，使用 **PATH 劫持**方式 mock：将 `tests/mock/` 目录放在 `PATH` 最前面，源脚本无需任何修改。
+默认情况下测试在 Docker 容器中运行。测试依赖（bash、curl、jq、php-cli 等）提前写入 `Dockerfile.test` 并构建成镜像，启动时直接 `docker compose up`，无需运行时安装。
+
+```dockerfile
+# Dockerfile.test（项目根目录）
+FROM alpine:3.19
+RUN apk add --no-cache bash curl jq php-cli php-zip coreutils procps
+COPY source/scripts/ /scripts/
+COPY tests/ /tests/
+COPY tests/mock/ /mock/
+ENV PATH="/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
 
 ```yaml
 # tests/docker-compose.yml
 services:
   test-runner:
-    image: alpine:3.19
-    volumes:
-      - ../source/scripts:/scripts:ro
-      - .:/tests:ro
-      - ./mock:/mock:ro
+    build:
+      context: ..
+      dockerfile: Dockerfile.test
     environment:
-      # PATH 劫持：mock/ 在最前面，docker/smartctl 优先走 mock
-      - PATH=/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - PATH=/mock:/scripts:...
+      - SAGE_TEST_ENV=1
+```
+
+**使用方式**:
+```bash
+cd tests && docker compose up --build
+# 首次构建镜像，之后直接 up 即可
+# 源码变更后需要 --build 重新构建镜像
 ```
 
 **Mock 原理**（以 `docker` 为例）：
