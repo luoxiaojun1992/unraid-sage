@@ -457,6 +457,101 @@ unraid-sage/
 
 ---
 
+### 6.4 安全测试环境（Docker 沙盒）
+
+#### 可行性分析
+
+| 测试类型 | 能否在 Docker 中运行 | 说明 |
+|---------|-------------------|------|
+| XSS 剥离、脱敏、原子写入、锁机制、超时、清理 | ✅ 完全可测 | 纯 Shell/PHP 逻辑，不依赖 Unraid |
+| config 校验、download-bundle | ✅ 完全可测 | 需要 PHP 环境（内置 web server 即可） |
+| collect-stats（CPU/内存/网络/系统） | ✅ 可测 | Linux 容器有 /proc、/sys，数据真实 |
+| collect-stats（Docker 部分） | ⚠️ 需要 mock | 容器内 Docker 命令不可用，需要 mock 脚本 |
+| collect-stats（阵列/磁盘） | ⚠️ 需要 mock | Unraid 特有的 var.ini、smartctl 需要模拟 |
+| daemon 启动、锁冲突、进程冲突 | ✅ 完全可测 | 进程管理和文件操作在任何 Linux 上都一致 |
+| .plg 安装、WebGUI 集成 | ❌ 无法测 | 需要实际的 Unraid emhttp 环境 |
+
+#### 推荐方案：Docker 沙盒 + Mock
+
+默认情况下测试在 Docker 容器中运行（轻量级 Alpine/Debian 镜像），容器提供 bash、curl、jq、php-cli 等依赖。对于 Unraid 特有的命令（docker、smartctl），通过 mock 脚本返回模拟数据。
+
+```yaml
+# docker-compose.yml (tests/)
+services:
+  test-runner:
+    image: alpine:3.19
+    volumes:
+      - ../source/scripts:/scripts:ro
+      - ../tests:/tests:ro
+      - ./mock:/mock:ro
+    environment:
+      - TEST_MOCK_DIR=/mock
+      - PATH=/scripts:/mock:/usr/local/sbin:/usr/local/bin:...
+    command: sh -c "apk add --no-cache bash curl jq php-cli php-zip coreutils procps && for t in /tests/test_*.sh; do bash \$t || echo FAILED: \$t; done"
+```
+
+**Mock 脚本**存放于 `tests/mock/`：
+- `docker` — 返回固定的 JSON 输出，模拟 `docker ps --format json` 和 `docker stats`
+- `smartctl` — 返回模拟的 SMART 数据
+- `var.ini` — 模拟 `/var/local/emhttp/var.ini`
+
+Mock 脚本检测 `$TEST_MOCK_DIR` 环境变量：有则使用 mock 数据，无则调用真实命令（宿主机直跑时）。
+
+#### 测试流程
+
+```
+开发者: git push → GitHub Actions / make test
+                        ↓
+              启动 Docker 容器
+         (alpine + bash/curl/jq/php)
+                        ↓
+          挂载 source/scripts (ro)
+          挂载 tests/         (ro)
+          挂载 tests/mock     (ro)
+                        ↓
+              逐个执行 test_*.sh
+                        ↓
+              输出测试报告 PASS/FAIL
+```
+
+**本地运行**:
+```bash
+cd tests && docker compose up --abort-on-container-exit
+```
+
+**只跑安全测试**:
+```bash
+docker compose run --rm test-runner sh -c "
+  for t in /tests/test_xss_prevention.sh /tests/test_desensitization.sh \
+           /tests/test_lock.sh /tests/test_clear_lock.sh \
+           /tests/test_timeout.sh /tests/test_atomic_write.sh \
+           /tests/test_config_validation.sh; do
+    bash \$t || exit 1
+  done
+"
+```
+
+#### Docker 可测的安全测试清单
+
+| 测试 | 依赖 |
+|------|------|
+| XSS 剥离、正常文本保留、双编码 | bash, sed |
+| 脱敏字段过滤 | bash, jq |
+| 原子写入：防半截读、.tmp 残留、mtime | bash, coreutils |
+| 锁跳过、PID 覆盖、名不匹配覆盖 | bash, procps |
+| clear-lock 四种场景 | bash, procps, coreutils |
+| 超时截断、锁释放 | bash, coreutils (timeout) |
+| 配置枚举校验 | bash, php-cli |
+| 下载 ZIP 打包、Content-Disposition、404 | php-cli, php-zip, curl |
+| daemon run-once / dry-run | bash, procps |
+| 启动冲突检测 | bash, procps |
+
+**不可测的部分**（需在真实 Unraid 上验收）:
+- `.plg` 安装流程
+- WebGUI PHP `.page` 与 emhttp 集成（CSRF、会话认证）
+- 真实 Docker 守护进程通信
+- 阵列/磁盘 SMART 数据采集
+
 ## 7. 验收标准
 
 - [ ] 插件安装后，无需手动干预，daemon 随系统启动自动运行
