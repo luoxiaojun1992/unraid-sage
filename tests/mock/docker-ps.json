@@ -1,0 +1,32 @@
+[
+  {
+    "ID": "abc123def456",
+    "Names": "nginx-proxy",
+    "Image": "nginx:1.25",
+    "ImageID": "sha256:abc123",
+    "Command": "/docker-entrypoint.sh nginx -g 'daemon off;'",
+    "CreatedAt": "2026-05-10 08:00:00",
+    "RunningFor": "3 days ago",
+    "Ports": "0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp",
+    "State": "running",
+    "Status": "Up 3 days",
+    "Size": "0B",
+    "Mounts": "/mnt/user/appdata/nginx:/etc/nginx/conf.d",
+    "Networks": "br0"
+  },
+  {
+    "ID": "def456ghi789",
+    "Names": "postgres-db",
+    "Image": "postgres:16",
+    "ImageID": "sha256:def456",
+    "Command": "docker-entrypoint.sh postgres",
+    "CreatedAt": "2026-05-09 14:30:00",
+    "RunningFor": "4 days ago",
+    "Ports": "0.0.0.0:5432->5432/tcp",
+    "State": "running",
+    "Status": "Up 4 days",
+    "Size": "0B",
+    "Mounts": "/mnt/user/appdata/postgres:/var/lib/postgresql/data",
+    "Networks": "br0"
+  }
+]

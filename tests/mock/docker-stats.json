@@ -1,0 +1,24 @@
+[
+  {
+    "Container": "abc123def456",
+    "Name": "nginx-proxy",
+    "ID": "abc123def456",
+    "CPUPerc": "0.15%",
+    "MemUsage": "45.67 MiB / 7.78 GiB",
+    "MemPerc": "0.57%",
+    "NetIO": "1.45 kB / 2.30 kB",
+    "BlockIO": "0 B / 0 B",
+    "Pids": "8"
+  },
+  {
+    "Container": "def456ghi789",
+    "Name": "postgres-db",
+    "ID": "def456ghi789",
+    "CPUPerc": "2.30%",
+    "MemUsage": "256.12 MiB / 7.78 GiB",
+    "MemPerc": "3.22%",
+    "NetIO": "5.67 MB / 12.3 MB",
+    "BlockIO": "45.2 MB / 12.1 MB",
+    "Pids": "15"
+  }
+]

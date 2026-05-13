@@ -298,6 +298,13 @@ unraid-sage/
 │   └── styles/
 │       └── advisor.css          #   WebGUI CSS
 └── tests/                       # 测试脚本
+    ├── docker-compose.yml        # Docker 沙盒测试编排
+    ├── mock/                     # Unraid 命令 Mock
+    │   ├── docker                # PATH 劫持脚本
+    │   ├── docker-ps.json        # docker ps 模拟输出
+    │   ├── docker-stats.json     # docker stats 模拟输出
+    │   ├── smartctl              # SMART 数据 Mock
+    │   └── var.ini               # 阵列状态 Mock
     ├── test_collect_stats.sh    #   采集脚本测试
     ├── test_query_ai.sh         #   AI 接口测试
     ├── test_daemon.sh           #   守护进程测试
@@ -473,29 +480,45 @@ unraid-sage/
 
 #### 推荐方案：Docker 沙盒 + Mock
 
-默认情况下测试在 Docker 容器中运行（轻量级 Alpine/Debian 镜像），容器提供 bash、curl、jq、php-cli 等依赖。对于 Unraid 特有的命令（docker、smartctl），通过 mock 脚本返回模拟数据。
+默认情况下测试在 Docker 容器中运行（Alpine Linux），容器提供 bash、curl、jq、php-cli 等依赖。对于 Unraid 特有的命令，使用 **PATH 劫持**方式 mock：将 `tests/mock/` 目录放在 `PATH` 最前面，源脚本无需任何修改。
 
 ```yaml
-# docker-compose.yml (tests/)
+# tests/docker-compose.yml
 services:
   test-runner:
     image: alpine:3.19
     volumes:
       - ../source/scripts:/scripts:ro
-      - ../tests:/tests:ro
+      - .:/tests:ro
       - ./mock:/mock:ro
     environment:
-      - TEST_MOCK_DIR=/mock
-      - PATH=/scripts:/mock:/usr/local/sbin:/usr/local/bin:...
-    command: sh -c "apk add --no-cache bash curl jq php-cli php-zip coreutils procps && for t in /tests/test_*.sh; do bash \$t || echo FAILED: \$t; done"
+      # PATH 劫持：mock/ 在最前面，docker/smartctl 优先走 mock
+      - PATH=/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ```
 
-**Mock 脚本**存放于 `tests/mock/`：
-- `docker` — 返回固定的 JSON 输出，模拟 `docker ps --format json` 和 `docker stats`
-- `smartctl` — 返回模拟的 SMART 数据
-- `var.ini` — 模拟 `/var/local/emhttp/var.ini`
+**Mock 原理**（以 `docker` 为例）：
 
-Mock 脚本检测 `$TEST_MOCK_DIR` 环境变量：有则使用 mock 数据，无则调用真实命令（宿主机直跑时）。
+```
+collect-stats.sh 调用:
+  docker ps -a --format json
+       ↓
+  系统查找 PATH:
+  /mock/docker  → 找到! 执行 mock
+       ↓
+  mock/docker 解析参数:
+  "ps -a --format json" → 返回 mock/docker-ps.json
+  "stats --no-stream"   → 返回 mock/docker-stats.json
+```
+
+**已实现的 Mock 文件**:
+```
+tests/mock/
+├── docker              # PATH 劫持脚本，根据参数返回不同 mock 数据
+├── docker-ps.json      # docker ps --format json 的模拟输出（2 个容器）
+├── docker-stats.json   # docker stats --no-stream 的模拟输出
+├── smartctl            # PATH 劫持脚本，返回模拟 SMART 健康数据
+└── var.ini             # 模拟 /var/local/emhttp/var.ini（4 盘阵列 + 缓存）
+```
 
 #### 测试流程
 

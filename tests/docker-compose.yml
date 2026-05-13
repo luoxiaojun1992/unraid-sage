@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  test-runner:
+    # 使用 Alpine Linux 轻量镜像，安装 bash/curl/jq/php 等依赖
+    image: alpine:3.19
+    volumes:
+      # 源码脚本（只读）
+      - ../source/scripts:/scripts:ro
+      # 测试脚本（只读）
+      - .:/tests:ro
+      # Mock 脚本和数据（只读）
+      - ./mock:/mock:ro
+      # 报告输出（读写，容器销毁后保留）
+      - ./reports:/reports
+    environment:
+      # PATH 劫持：mock/ 放在最前面，docker/smartctl 等命令优先走 mock
+      - PATH=/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # /var/local/emhttp/var.ini 在容器中不存在，挂载 mock 版本
+      - VAR_INI_MOCK=/mock/var.ini
+    working_dir: /scripts
+    command: >
+      sh -c "
+        echo '=== Installing test dependencies ===' &&
+        apk add --no-cache bash curl jq php-cli php-zip coreutils procps util-linux findutils &&
+        chmod +x /mock/docker /mock/smartctl &&
+        echo '' &&
+        echo '=== Running all tests ===' &&
+        failures=0 &&
+        for t in /tests/test_*.sh; do
+          echo '--- Running: ' \$$(basename \"\$$t\") ' ---';
+          if bash \$$t 2>&1; then
+            echo 'PASS: ' \$$(basename \"\$$t\");
+          else
+            echo 'FAIL: ' \$$(basename \"\$$t\");
+            failures=\$$((failures + 1));
+          fi;
+          echo '';
+        done;
+        echo '=== Done ===';
+        echo 'Passed: \$$(ls /tests/test_*.sh | wc -l) - \$$failures failed';
+        exit \$$failures;
+      "

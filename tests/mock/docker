@@ -1,0 +1,19 @@
+#!/bin/bash
+# Mock for `docker` commands called by collect-stats.sh
+# PATH 劫持：将 tests/mock/ 放在 PATH 最前面即可生效
+# 原理：collect-stats.sh 调用 docker 时，系统先找到这个 mock 而非真实的 docker
+
+MOCK_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+case "$*" in
+  *"ps -a --format json"*)
+    cat "$MOCK_DIR/docker-ps.json"
+    ;;
+  *"stats --no-stream"*)
+    cat "$MOCK_DIR/docker-stats.json"
+    ;;
+  *)
+    echo "docker: unknown command: $*" >&2
+    exit 1
+    ;;
+esac
