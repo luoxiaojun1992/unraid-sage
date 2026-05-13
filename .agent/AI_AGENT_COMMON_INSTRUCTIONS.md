@@ -278,9 +278,9 @@ WebGUI PHP 读取 last-advice.json / data/ 目录展示
 
 ```
 unraid-sage/
-├── AI_AGENT_COMMON_INSTRUCTIONS.md  # 本文件
-├── ai-advisor.plg               # ↑ 安装器（构建时生成到根目录）
-├── source/                      # ↓ 源文件目录
+├── Dockerfile.test              # 测试镜像构建文件
+├── docker-compose-test.yml      # 测试编排（mock API + test runner）
+├── source/                      # 插件源文件目录
 │   ├── default.cfg              #   默认配置
 │   ├── scripts/
 │   │   ├── collect-stats.sh     #   系统状态采集
@@ -297,26 +297,33 @@ unraid-sage/
 │   │   └── advisor.js           #   WebGUI JS
 │   └── styles/
 │       └── advisor.css          #   WebGUI CSS
-└── tests/                       # 测试脚本
-    ├── docker-compose.yml        # Docker 沙盒测试编排
-    ├── mock/                     # Unraid 命令 + AI API Mock
-    │   ├── api-server.php        # Mock AI API (PHP 内置服务器)
-    │   ├── docker                # PATH 劫持脚本
-    │   ├── docker-ps.json        # docker ps 模拟输出
-    │   ├── docker-stats.json     # docker stats 模拟输出
-    │   ├── smartctl              # SMART 数据 Mock
-    │   └── var.ini               # 阵列状态 Mock
-    ├── test_collect_stats.sh    #   采集脚本测试
-    ├── test_query_ai.sh         #   AI 接口测试
-    ├── test_daemon.sh           #   守护进程测试
-    ├── test_atomic_write.sh     #   原子写入测试
-    ├── test_lock.sh             #   文件锁测试
-    ├── test_clear_lock.sh       #   手动清除锁测试
-    ├── test_timeout.sh          #   超时保护测试
-    ├── test_advice_timestamp.sh #   建议时间戳测试
-    ├── test_xss_prevention.sh   #   XSS 防护测试
-    ├── test_desensitization.sh  #   数据脱敏测试
-    └── test_cleanup.sh          #   缓存清理测试
+├── tests/                       # 测试脚本
+│   ├── mock/                    # Unraid 命令 + AI API Mock
+│   │   ├── api-server.php       #   Mock AI API (PHP 内置服务器)
+│   │   ├── docker               #   PATH 劫持脚本
+│   │   ├── docker-ps.json       #   docker ps 模拟输出
+│   │   ├── docker-stats.json    #   docker stats 模拟输出
+│   │   ├── smartctl             #   SMART 数据 Mock
+│   │   └── var.ini              #   阵列状态 Mock
+│   ├── test_collect_stats.sh   #   采集脚本测试
+│   ├── test_query_ai.sh        #   AI 接口测试
+│   ├── test_daemon.sh          #   守护进程测试
+│   ├── test_atomic_write.sh    #   原子写入测试
+│   ├── test_lock.sh            #   文件锁测试
+│   ├── test_clear_lock.sh      #   手动清除锁测试
+│   ├── test_timeout.sh         #   超时保护测试
+│   ├── test_advice_timestamp.sh#   建议时间戳测试
+│   ├── test_xss_prevention.sh  #   XSS 防护测试
+│   ├── test_desensitization.sh #   数据脱敏测试
+│   └── test_cleanup.sh         #   缓存清理测试
+├── .agent/                     # AI 辅助指令
+│   ├── AI_AGENT_COMMON_INSTRUCTIONS.md  # 本文件
+│   ├── SECURITY.md             #   安全总览
+│   └── SECURITY_AUDIT.md       #   安全审计报告
+├── .workbuddy/
+│   └── CODEBUDDY.md            #   CodeBuddy 入口（引用 .agent/）
+└── .github/
+    └── copilot-instructions.md  #   Copilot 入口（引用 .agent/）
 ```
 
 ### 部署路径（安装后）
@@ -499,14 +506,14 @@ mock-api 容器                    test-runner 容器
 ```
 
 ```yaml
-# tests/docker-compose.yml
+# docker-compose-test.yml
 services:
   mock-api:
-    build: ../Dockerfile.test
+    build: .
     command: php -S 0.0.0.0:11434 -t /mock /mock/api-server.php
 
   test-runner:
-    build: ../Dockerfile.test
+    build: .
     depends_on: [mock-api]
     environment:
       - SAGE_API_ENDPOINT=http://mock-api:11434/v1/chat/completions
@@ -515,7 +522,7 @@ services:
 
 **使用方式**:
 ```bash
-cd tests && docker compose up --build
+docker compose -f docker-compose-test.yml up --build
 # mock-api 先启动，test-runner 等待健康检查通过后执行测试
 ```
 
@@ -568,12 +575,12 @@ tests/mock/
 
 **本地运行**:
 ```bash
-cd tests && docker compose up --abort-on-container-exit
+docker compose -f docker-compose-test.yml up --abort-on-container-exit
 ```
 
 **只跑安全测试**:
 ```bash
-docker compose run --rm test-runner sh -c "
+docker compose -f docker-compose-test.yml run --rm test-runner sh -c "
   for t in /tests/test_xss_prevention.sh /tests/test_desensitization.sh \
            /tests/test_lock.sh /tests/test_clear_lock.sh \
            /tests/test_timeout.sh /tests/test_atomic_write.sh \
