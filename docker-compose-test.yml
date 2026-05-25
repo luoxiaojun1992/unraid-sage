@@ -4,7 +4,7 @@ services:
   # Mock AI API — 模拟 OpenAI 兼容的 chat completions 端点
   mock-api:
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile.test
       # mock-api 只需要 PHP，用 test 镜像跑 PHP 内置服务器
     image: unraid-sage-test
@@ -23,12 +23,12 @@ services:
   # 测试执行器
   test-runner:
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile.test
     environment:
       # PATH 劫持
       - PATH=/mock:/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      # mock API endpoint（指向 mock-api 容器）
+      # mock API endpoint（测试用。生产环境从 ai-advisor.cfg 读取）
       - SAGE_API_ENDPOINT=http://mock-api:11434/v1/chat/completions
       # 标记测试环境
       - SAGE_TEST_ENV=1

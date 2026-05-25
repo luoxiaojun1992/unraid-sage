@@ -357,6 +357,7 @@ unraid-sage/
 - **超时保护**: 所有可能长时间执行的命令必须使用 `timeout N` 包起来，collect-stats 30s、query-ai 120s、清理 10s
 - **HTML 剥离**: `query-ai.sh` 处理 AI 返回的文本字段时，必须用 `sed 's/<[^>]*>//g'` 剥离所有 HTML 标签，之后再写入 JSON
 - **日志**: 统一使用 `logger -t ai-advisor "message"` 写入系统日志
+- **配置优先级**: 环境变量 > 配置文件。`query-ai.sh` 先检查 `$SAGE_API_ENDPOINT`（用于测试覆盖），不存在时从 `ai-advisor.cfg` 读取，都不存在时用硬编码默认值
 
 ### 5.2 PHP (.page)
 
@@ -516,6 +517,7 @@ services:
     build: .
     depends_on: [mock-api]
     environment:
+      # 测试用环境变量（生产环境从 ai-advisor.cfg 读取）
       - SAGE_API_ENDPOINT=http://mock-api:11434/v1/chat/completions
       - SAGE_TEST_ENV=1
 ```
@@ -530,7 +532,7 @@ docker compose -f docker-compose-test.yml up --build
 - 接收 POST `/v1/chat/completions`，返回预设的 3 条建议（high/performance、medium/storage、low/security）
 - 暴露 GET `/health` 端点用于健康检查
 - 监听 11434 端口，与默认的 Ollama 端口一致
-- `query-ai.sh` 通过 `SAGE_API_ENDPOINT` 环境变量切换端点，无需改代码
+- `query-ai.sh` 在测试环境中通过 `SAGE_API_ENDPOINT` 环境变量切换端点。**生产环境中**配置从 `/boot/config/plugins/ai-advisor/ai-advisor.cfg` 读取，环境变量优先级高于配置文件，两者都不存在时使用默认值 `http://localhost:11434/v1/chat/completions`
 
 **Mock 原理**（以 `docker` 为例）：
 
